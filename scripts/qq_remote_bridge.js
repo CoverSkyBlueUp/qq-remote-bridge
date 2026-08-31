@@ -175,9 +175,11 @@ let activeHeadless = null;
 function runHeadlessSession(task, onProgress) {
   return new Promise(resolve => {
     const startedAt = Date.now();
+    // Fallback heartbeat (only when no [STEP] lines arrive). [STEP] lines
+    // streamed by the patched headless carry real steps; we prefer those.
     const progressTimer = setInterval(() => {
       if (onProgress) {
-        try { onProgress(Math.round((Date.now() - startedAt) / 1000)); } catch (_) {}
+        try { onProgress({ kind: "tick", secs: Math.round((Date.now() - startedAt) / 1000) }); } catch (_) {}
       }
     }, PROGRESS_INTERVAL);
 
@@ -198,7 +200,25 @@ function runHeadlessSession(task, onProgress) {
       resolve(out.trim() || "[agent 未返回结论]");
     };
 
-    child.stdout.on("data", c => { out += c.toString("utf8"); });
+    // Accumulate non-STEP stdout/stderr (the final conclusion). [STEP] lines
+    // are real intermediate steps -> forward to onProgress as live updates.
+    let stepAccum = "";
+    const handleChunk = (c) => {
+      const s = c.toString("utf8");
+      out += s;
+      stepAccum += s;
+      const lines = stepAccum.split("\n");
+      stepAccum = lines.pop(); // keep partial last line
+      for (const ln of lines) {
+        const m = ln.match(/^\[STEP\]\s*(.*)$/);
+        if (m && onProgress) {
+          try { onProgress({ kind: "step", text: m[1].trim() }); } catch (_) {}
+        } else if (ln.trim()) {
+          // non-step output; ignore for progress (might be final text tail)
+        }
+      }
+    };
+    child.stdout.on("data", handleChunk);
     child.stderr.on("data", c => { out += c.toString("utf8"); });
 
     const killTimer = setTimeout(() => {
@@ -269,11 +289,11 @@ async function execute(cmd, onProgress) {
       "  hostname / ver / date / time",
       "  echo  <词>  回显",
       "━━━━━━━━━━━━━━━━━━",
-      "🛑 中断当前任务",
-      "  中断 / 取消 / stop / cancel / abort",
-      "━━━━━━━━━━━━━━━━━━",
       "💬 其它明确文字 = 转交 AI agent 处理",
-      "  先确认 → 每 8 秒进度 → 回结论"
+      "  先确认 → 每 8 秒进度 → 回结论",
+      "━━━━━━━━━━━━━━━━━━",
+      "🛑 中断当前任务",
+      "  中断 / 取消 / stop / cancel / abort"
     ].join("\n");
   }
   if (isAllowed(trimmed)) {
@@ -365,12 +385,19 @@ async function handleEvent(d, t) {
     }
   }
 
-  // Periodic progress heartbeat while the agent runs, sent on the same
-  // msg_id with increasing msg_seq.
-  let lastProgressAt = Date.now();
-  const onProgress = async (elapsedSec) => {
+  // Live progress updates while the agent runs, sent on the same msg_id with
+  // increasing msg_seq. Real steps (from [STEP] lines) are preferred; a plain
+  // tick is a fallback heartbeat with elapsed seconds.
+  const onProgress = async (p) => {
     try {
-      const note = `⏳ 仍在处理中，已运行 ${elapsedSec}s，请稍候…`;
+      let note;
+      if (p && p.kind === "step") {
+        const text = String(p.text || "").slice(0, 120);
+        note = "⚙️ " + (text || "正在执行…");
+      } else {
+        const secs = p && p.secs ? p.secs : Math.round((Date.now() - lastProgressAt) / 1000);
+        note = "⏳ 仍在处理中…";
+      }
       await replyToUser(openid, msgId, note, nextMsgSeq(msgId));
       lastProgressAt = Date.now();
     } catch (e) {

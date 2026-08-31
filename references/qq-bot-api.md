@@ -151,3 +151,40 @@ POST /v2/groups/{group_openid}/messages
 - Node 24 的 `TextDecoder("gbk")` 需 ICU 支持（本机 OK）
 
 **教训**：daemon 内部日志写 UTF-8 文件，用 **Node 以 UTF-8 读取**才见真面目；pwsh 的 `Get-Content` 默认按 GBK 读 UTF-8 文件，会显示乱码造成误判（曾误以为是 WS 解码问题）。
+
+## 8. headless 步骤补丁（真实执行步骤回推）
+
+**背景**：DSH 的 `headless` 运行时默认只在结束输出最终文本，**运行中不暴露中间步骤**。为了让 QQ 桥在任务执行中回推「正在执行的步骤」，对 `dsh-headless` 插件打一个本地补丁，把 agent 的中间事件（推理 thinking、工具调用）以 `[STEP]` 前缀**实时打印到 stdout**，由 daemon 的 `spawn` 监听流式转发。
+
+**补丁位置**：`%USERPROFILE%\.dsh\profiles\node_modules\@deepseek-ai\dsh-headless\lib\index.js`
+（改前先 `Copy-Item index.js index.js.bak` 备份）
+
+**改动点**：在 `run()` 中、`agent.followup(...)` 之前插入：
+
+```js
+const unsubSteps = ctx.on("session/event", (_session, event) => {
+  try {
+    const t = event?.type;
+    if (t === "assistant/message") {
+      const blocks = event?.data?.message?.content ?? [];
+      const think = blocks.filter(b => b.type === "thinking" || b.type === "reasoning")
+                          .map(b => b.text ?? b.thinking ?? "").join("");
+      if (think.trim()) process.stdout.write(`[STEP] 推理: ${think.trim()}\n`);
+    } else if (String(t).startsWith("tool/")) {
+      process.stdout.write(`[STEP] 工具: ${t}\n`);
+    } else if (t === "turn/start") {
+      process.stdout.write(`[STEP] 开始处理…\n`);
+    }
+  } catch (_) {}
+});
+agent.followup(...);
+await agent.whenIdle();
+unsubSteps?.();
+```
+
+**验证**：跑任意 headless 任务，stdout 应出现 `[STEP] 推理: ...` / `[STEP] 工具: tool/call`。
+
+**注意事项**：
+- 补丁在 `profiles/node_modules` 下，**DSH 升级 / pnpm 重装会被覆盖**，需重新打
+- 该补丁会让**所有** headless 调用在 stdout 输出 `[STEP]` 行（不影响最终结论文本输出，最终文本在 `[STEP]` 之后单独一行）
+- daemon 已实现**自动退化**：若 stdout 无 `[STEP]`（补丁缺失），进度回退为每 8 秒时间心跳，功能不受影响

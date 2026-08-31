@@ -27,14 +27,17 @@ metadata:
 - **仅响应授权 openid** 的单聊消息
 - **白名单只读命令**直接执行（`help`/`ls`/`ps`/`ipconfig`/`systeminfo` 等）
 - **中断指令**（`中断`/`取消`/`停止`/`stop`/`cancel`/`abort`/`halt`）→ 真正地**杀掉正在运行的 headless 任务**，而非新开一个
-- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中每 8 秒发进度心跳**，结束发结论
+- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中流式回推真实执行步骤**（推理/工具调用，来自 headless 插件补丁的 `[STEP]` 事件），结束发结论
 - 断线自动重连、心跳保活；由 `watchdog` 保证 daemon 崩溃自愈；由登录启动项自动拉起
 - `showWindow`/wscript 无窗口运行，不弹控制台
 
 ### 消息流（自然语言任务）
 1. ✅ 已收到，正在新建会话处理你的请求，请稍候…
-2. ⏳ 仍在处理中，已运行 8s / 16s / 24s …（每 8 秒）
-3. （最终结论）
+2. ⚙️ 推理: <agent 的真实思考> / ⚙️ 工具: tool/call…（`[STEP]` 流式实时回推）
+3. （兜底：长时间无新步骤时发「⏳ 仍在处理中」心跳）
+4. （最终结论）
+
+> **真实步骤依赖 headless 补丁**：`[STEP]` 由对 `dsh-headless` 插件的本地补丁产生（`run()` 中 `ctx.on("session/event")` 监听，将推理/工具事件打印到 stdout，见 `references/qq-bot-api.md` 的「headless 步骤补丁」）。DSH 升级会覆盖此补丁，需重新打。若补丁缺失，daemon 自动退化为每 8 秒时间心跳。
 
 ### 中断
 处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可立即杀掉正在运行的 agent 任务并收到「✅ 已中断」。中断指令不会新建会话、不先发 ack。无运行任务时回「当前没有正在运行的任务」。
@@ -75,7 +78,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -C
 3. 把 `qq_remote_bridge_launch.cmd` 的快捷方式放入 `shell:startup` 实现登录自启
 
 ### 方式 C：作为 DSH skill 安装到本机
-复制整个 `qq-remote-bridge/` 到 `C:\Users\<你>\.dsh\skills\qq-remote-bridge\` 即可被 DSH 加载为 skill，之后任何会话可调用其脚本与文档。
+复制整个 `qq-remote-bridge/` 到 `%USERPROFILE%\.dsh\skills\qq-remote-bridge\` 即可被 DSH 加载为 skill，之后任何会话可调用其脚本与文档。
 
 ## 四、部署后验证
 
@@ -84,7 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -C
 powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 ```
 - 日志出现 `WS READY session=...` 即上线
-- 用你的 QQ 私聊机器人发 `help` → 应收到「🤖 QQ 远程控制 · 指令菜单」分组菜单
+- 用你的 QQ 私聊机器人发 `help` → 应收到「可用只读命令…」
 - 发一条自然语言（如「查一下当前时间」）→ 应收到 ack + 进度心跳 + 结论
 
 ## 五、日常运维

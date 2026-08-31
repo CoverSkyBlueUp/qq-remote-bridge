@@ -8,8 +8,9 @@
 
 - **常驻守护**：WebSocket 连接 QQ 开放平台网关，自动获取 / 刷新 `access_token`（7200s，提前 60s 刷新），断线自动重连、心跳保活
 - **仅响应授权 openid**：只有配置的 `authorizedOpenids` 里的单聊消息才会被处理
-- **白名单只读命令**：`help` / `ls` / `dir` / `ps` / `tasklist` / `ipconfig` / `systeminfo` / `whoami` / `hostname` / `ver` / `date` / `time` / `echo` 等，直接执行并返回
-- **自然语言 → DSH agent 会话**：任何非白名单的明确文字，转交 DSH `headless` 新会话处理（标准模式 + `workspace-write` + 默认工作区），先发送确认消息，**处理过程中每 8 秒发送进度心跳**，结束回推结论
+- **白名单只读命令**：`help` / `ls` / `dir` / `ps` / `tasklist` / `ipconfig` / `systeminfo` / `whoami` / `hostname` / `ver` / `date` / `time` / `echo` 等，直接执行并返回（`help` 显示分组菜单）
+- **自然语言 → DSH agent 会话**：任何非白名单的明确文字，转交 DSH `headless` 新会话处理（标准模式 + `workspace-write` + 默认工作区），先发送确认消息，**处理过程中流式回推真实执行步骤**（推理 / 工具调用），结束回推结论
+- **中断当前任务**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可**真正杀掉**正在运行的 agent 任务（而非再开一个）
 - **崩溃自愈**：`watchdog` 每 30s 检查 daemon，异常自动重启
 - **登录自启**：注册进用户 Startup 目录，Windows 登录后自动拉起
 - **无窗口运行**：通过 `wscript` 隐藏控制台窗口，不打扰用户
@@ -17,8 +18,11 @@
 ### 消息流（自然语言任务）
 
 1. ✅ 已收到，正在新建会话处理你的请求，请稍候…
-2. ⏳ 仍在处理中，已运行 8s / 16s / 24s …（每 8 秒一条）
-3. （最终结论）
+2. ⚙️ 推理: <agent 真实思考> / ⚙️ 工具: tool/call…（`[STEP]` 流式实时回推，见「headless 步骤补丁」）
+3. （兜底：长时间无新步骤时发「⏳ 仍在处理中」心跳）
+4. （最终结论）
+
+> 真实步骤依赖对 `dsh-headless` 插件的本地补丁（见 `references/qq-bot-api.md` 第 8 节）；DSH 升级会覆盖，需重打；补丁缺失时自动退化为 8s 时间心跳。
 
 ## 前置条件
 
