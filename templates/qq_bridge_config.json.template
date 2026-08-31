@@ -1,0 +1,11 @@
+{
+  "appId": "<APPID>",
+  "clientSecret": "<CLIENT_SECRET>",
+  "authorizedOpenids": ["<USER_OPENID>"],
+  "gateway": "wss://api.sgroup.qq.com/websocket",
+  "apiHost": "api.bot.qq.com",
+  "tokenHost": "bots.qq.com",
+  "replyContentLimit": 1500,
+  "commandTimeoutMs": 20000
+}
+
