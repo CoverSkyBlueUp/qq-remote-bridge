@@ -252,7 +252,9 @@ function runHeadlessSession(task, onProgress) {
       for (const ln of lines) {
         const m = ln.match(/^\[STEP\]\s*(.*)$/);
         if (m && onProgress) {
-          if (activeTask) activeTask.lastStep = m[1].trim();
+          // Record only actionable steps (tool calls) for progress queries;
+          // raw thinking/reasoning is skipped per user preference.
+          if (activeTask && !m[1].trim().startsWith("推理")) activeTask.lastStep = m[1].trim();
           try { onProgress({ kind: "step", text: m[1].trim() }); } catch (_) {}
         } else if (ln.trim()) {
           out += ln + "\n";
@@ -361,9 +363,26 @@ async function execute(cmd, onProgress) {
   return runHeadlessSession(trimmed, onProgress);
 }
 
-function truncate(s) {
-  if (s.length <= REPLY_LIMIT) return s;
-  return s.slice(0, REPLY_LIMIT) + "\n...[输出已截断 " + (s.length - REPLY_LIMIT) + " 字符]";
+// Batch a long reply into multiple passive messages on the same msg_id
+// (increasing msg_seq), instead of truncating it to one message. At most
+// BATCH_MAX_CHUNKS chunks of REPLY_LIMIT chars each; anything beyond is
+// summarized with an omission note.
+const BATCH_MAX_CHUNKS = 6;
+async function replyToUserBatched(openid, msgId, content) {
+  if (!content) return;
+  const chunks = [];
+  let remaining = content;
+  while (remaining.length > 0 && chunks.length < BATCH_MAX_CHUNKS) {
+    chunks.push(remaining.slice(0, REPLY_LIMIT));
+    remaining = remaining.slice(REPLY_LIMIT);
+  }
+  if (remaining.length > 0) {
+    chunks[chunks.length - 1] += "\n...[其余 " + remaining.length + " 字符已省略]";
+  }
+  for (let k = 0; k < chunks.length; k++) {
+    await replyToUser(openid, msgId, chunks[k], nextMsgSeq(msgId));
+    if (k < chunks.length - 1) await new Promise(r => setTimeout(r, 250));
+  }
 }
 
 // ---- websocket lifecycle -------------------------------------------------
@@ -424,11 +443,13 @@ async function handleEvent(d, t) {
   }
   log(`CMD openid=${openid} content=` + JSON.stringify(content));
 
-  // Natural-language (non-whitelist, non-interrupt) tasks first send an
-  // immediate acknowledgment so the user knows a new session is running.
-  // Interrupt commands are NOT acknowledged as a new session and are handled
-  // directly by execute().
-  if (!isWhitelistCommand(content) && !isInterrupt(content)) {
+  // Only acknowledge when a new headless session will actually be started:
+  // progress queries and busy-notice messages (a task is already running and
+  // this message won't spawn a session) must NOT get the "starting a new
+  // session" ack — they get their direct reply from execute() instead.
+  const startsNewSession = !isWhitelistCommand(content) && !isInterrupt(content) &&
+    !isProgressQuery(content) && !(activeHeadless && !activeHeadless.killed);
+  if (startsNewSession) {
     try {
       const ack = "✅ 已收到，正在新建会话处理你的请求，请稍候…\n（发「进度」可随时查询进展，「中断」可停止）";
       await replyToUser(openid, msgId, ack, nextMsgSeq(msgId));
@@ -447,25 +468,32 @@ async function handleEvent(d, t) {
     try {
       const now = Date.now();
       if (now - lastProgressAt < PROGRESS_INTERVAL) return; // throttled
+      // Claim the throttle window BEFORE the async send: the check and this
+      // assignment are synchronous, so concurrent onProgress calls (multiple
+      // [STEP] events + the tick firing together) can no longer all pass the
+      // check while the first reply is still in flight (which previously
+      // caused bursts of 2-5 duplicate progress pushes every 60s).
+      lastProgressAt = now;
       let note;
       if (p && p.kind === "step") {
         const text = String(p.text || "").slice(0, 120);
+        // Never push raw thinking / generic start notices to the user; only
+        // actionable steps (tool calls) are worth a progress message.
+        if (/^(推理|开始处理)/.test(text)) return;
         note = "⚙️ " + (text || "正在执行…");
       } else {
         const secs = p && p.secs ? p.secs : Math.round((now - lastProgressAt) / 1000);
         note = "⏳ 仍在处理中…(已运行 " + secs + " 秒,发「进度」可查询详情)";
       }
       await replyToUser(openid, msgId, note, nextMsgSeq(msgId));
-      lastProgressAt = now;
     } catch (e) {
       log("PROGRESS REPLY ERROR " + e.message);
     }
   };
 
   const result = await execute(content, onProgress);
-  const reply = truncate(result);
   try {
-    await replyToUser(openid, msgId, reply, nextMsgSeq(msgId));
+    await replyToUserBatched(openid, msgId, result);
   } catch (e) {
     log("REPLY ERROR " + e.message);
   }

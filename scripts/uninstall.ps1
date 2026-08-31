@@ -32,12 +32,16 @@ Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
   try { (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction Stop).CommandLine -like "*qq_bridge_watchdog*" } catch { $false }
 } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue; Write-Step "已停止 watchdog pid=$($_.Id)" }
 
-# ---- 3) remove login autostart ------------------------------------------
+# ---- 3) remove login autostart (scheduled task + legacy Startup entry) ----
+$TaskName = "DSH_QQ_Remote_Bridge"
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($task) {
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+  Write-Step "已移除登录自启计划任务: $TaskName"
+}
 if (Test-Path $StartupLink) {
   Remove-Item $StartupLink -Force -ErrorAction SilentlyContinue
-  Write-Step "已移除登录自启: $StartupLink"
-} else {
-  Write-Step "登录自启条目不存在"
+  Write-Step "已移除旧启动文件夹条目: $StartupLink"
 }
 
 # ---- 4) optionally remove config ----------------------------------------

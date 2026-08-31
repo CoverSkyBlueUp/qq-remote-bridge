@@ -7,7 +7,7 @@ description:
   触发场景：用户要求部署/接入腾讯或 QQ 机器人、重装系统后重新部署、通过 QQ 发指令查询本机、排查机器人收不到/回不了消息、启动/停止/卸载 QQ 桥。
 metadata:
   author: CoverSkyBlueUp
-  version: "2.1.0"
+  version: "2.1.2"
 ---
 
 # qq-remote-bridge Skill（可分享部署版）
@@ -27,19 +27,21 @@ metadata:
 - **仅响应授权 openid** 的单聊消息
 - **白名单只读命令**直接执行（`help`/`ls`/`ps`/`ipconfig`/`systeminfo` 等）
 - **中断指令**（`中断`/`取消`/`停止`/`stop`/`cancel`/`abort`/`halt`）→ 真正地**杀掉正在运行的 headless 任务**，而非新开一个
-- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中按节流间隔回推真实执行步骤**（推理/工具调用，来自 headless 插件补丁的 `[STEP]` 事件），结束发结论
+- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + 可配置沙箱 + 可配置工作区），先发确认消息，**过程中按节流间隔回推真实执行步骤**（仅工具调用等可执行动作，来自 headless 插件补丁的 `[STEP]` 事件；推理/思考内容不回推），结束发结论（超长自动分批）
 - **进度节流 + 按需查询**：进度推送至少间隔 `progressIntervalMs`（默认 60s，配置可调）；任务进行中发 `进度`/`进展`/`进行到哪`/`还在吗` 等可**立即**收到当前进度回推，不会新建会话
-- 断线自动重连、心跳保活；由 `watchdog` 保证 daemon 崩溃自愈；由登录启动项自动拉起
+- 断线自动重连、心跳保活；由 `watchdog` 保证 daemon 崩溃自愈；由**登录自启计划任务**（Logon 触发，与 DSH 自身自启机制一致）随登录自动拉起
 - `showWindow`/wscript 无窗口运行，不弹控制台
 
 ### 消息流（自然语言任务）
 1. ✅ 已收到，正在新建会话处理你的请求，请稍候…（发「进度」可随时查询，「中断」可停止）
-2. ⚙️ 推理 / ⚙️ 工具: …（`[STEP]` 步骤，受 `progressIntervalMs` 节流，默认 ≥60s 一条）
+2. ⚙️ 工具: tool/call…（`[STEP]` 步骤，受 `progressIntervalMs` 节流，默认 ≥60s 一条；**推理内容不回推**）
 3. （兜底：无新步骤时按 `progressIntervalMs` 发「⏳ 仍在处理中」心跳）
-4. 处理中发 `进度` 等查询词 → 立即回推当前任务/已运行秒数/最近步骤（不新建会话）
-5. （最终结论）
+4. 处理中发 `进度` 等查询词 → 立即回推当前任务/已运行秒数/最近工具步骤（不新建会话）
+5. （最终结论；超长结论按 `replyContentLimit` 分批发送，最多 6 批）
 
-> **真实步骤依赖 headless 补丁**：`[STEP]` 由对 `dsh-headless` 插件的本地补丁产生（`run()` 中 `ctx.on("session/event")` 监听，将推理/工具事件打印到 stdout，见 `references/qq-bot-api.md` 的「headless 步骤补丁」）。DSH 升级会覆盖此补丁，需重新打。若补丁缺失，daemon 自动退化为按 `progressIntervalMs` 的时间心跳。
+> **真实步骤依赖 headless 补丁**：`[STEP]` 由对 `dsh-headless` 插件的本地补丁产生（`run()` 中 `ctx.on("session/event")` 监听，将推理/工具事件打印到 stdout，见 `references/qq-bot-api.md` 的「headless 步骤补丁」）。补丁内**推理内容已折叠为单行**（避免多行换行破坏桥的行解析）。DSH 升级会覆盖此补丁，需重新打。若补丁缺失，daemon 自动退化为按 `progressIntervalMs` 的时间心跳。
+
+> **浏览器等跨沙箱工具**：若自然语言任务需要启动浏览器（如 web-access skill 的 Edge 调试模式），headless 会话需放行 msedge.exe / 浏览器 profile。推荐把 headless profile 配置为「全盘可写 + 带确认」（sandbox `danger-full-access` + approval `ask`，见 `references/qq-bot-api.md` 的「headless 沙箱配置」），否则沙箱会拒绝启动浏览器且 headless 无人审批升级。
 
 ### 中断
 处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可立即杀掉正在运行的 agent 任务并收到「✅ 已中断」。中断指令不会新建会话、不先发 ack。无运行任务时回「当前没有正在运行的任务」。
@@ -72,7 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -C
 
 若你的 `dsh` 装在非默认路径，可加 `-DshBin "C:\...\dsh\lib\bin.js"`。脚本会：
 1. 生成 `qq_bridge_config.json`
-2. 把 `qq_remote_bridge_launch.cmd` 注册进用户 Startup 目录（登录自启）
+2. 注册**登录自启计划任务** `DSH_QQ_Remote_Bridge`（Logon 触发 + 30s 延迟，与 DSH 自身登录自启机制一致，随登录自动拉起；自动移除旧 Startup 文件夹条目防双开）
 3. 启动 daemon + watchdog
 4. 打印日志
 
@@ -80,7 +82,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -C
 复制 `scripts/` 到目标目录，编辑 `qq_bridge_config.json`（参考 `templates/qq_bridge_config.json.template`），填入 appId/clientSecret/authorizedOpenids，然后：
 1. 运行 `qq_bridge_silent.vbs` 启动 daemon（无窗口）
 2. 运行 `qq_bridge_watchdog.ps1` 启动看门狗
-3. 把 `qq_remote_bridge_launch.cmd` 的快捷方式放入 `shell:startup` 实现登录自启
+3. 注册登录自启计划任务（推荐，与 DSH 一致）：
+   ```powershell
+   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PWD\qq_bridge_watchdog.ps1`""
+   $trigger = New-ScheduledTaskTrigger -AtLogOn; $trigger.Delay = "PT30S"
+   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+   Register-ScheduledTask -TaskName "DSH_QQ_Remote_Bridge" -Action $action -Trigger $trigger -Settings $settings -Force
+   ```
 
 ### 方式 C：作为 DSH skill 安装到本机
 复制整个 `qq-remote-bridge/` 到 `%USERPROFILE%\.dsh\skills\qq-remote-bridge\` 即可被 DSH 加载为 skill，之后任何会话可调用其脚本与文档。
@@ -122,13 +130,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 
 - 仅响应 `authorizedOpenids` 中的 openid
 - 白名单**只读命令**直接执行；危险/写入/删除关键字（`del`/`rm`/`format`/`shutdown`/`>`/`&&`/`|`/`;` 等）拒绝
-- 自然语言转交 headless 会话，受 DSH **workspace-write 沙箱**约束（不会越权）
-- 回复截断至 `replyContentLimit`（默认 1500 字符）
+- 自然语言转交 headless 会话，受 DSH 沙箱约束（默认 `workspace-write`；若需浏览器等跨沙箱工具，配置「全盘可写 + 带确认」见 `references/qq-bot-api.md`，注意权衡全盘权限）
+- 回复超长时按 `replyContentLimit`（默认 1500 字符）**分批发送**，最多 6 批，超出部分省略标注
 - **不要把真实 `clientSecret` 写入任何会分享的文档**；模板用 `<...>` 占位
 - 会话内沙箱操作被拒时，用 `sandbox_permissions: danger-full-access` 单次重试（登录常驻场景用户已授权），勿另寻绕过
 
 ## 八、版本记录
 
+- v2.1.2：推送与回复质量修复——进度推送**不再回推推理/思考内容**（仅工具动作；`[STEP]` 推理折叠单行防污染最终回复）；进度查询只显示工具步骤；修复 60s 节流竞态（曾导致进度连发爆发）；修复进度/忙碌消息**误发 ack**；**长结论分批发送**（默认 1500 字符/批，最多 6 批）
+- v2.1.1：登录自启改为**计划任务**（Logon 触发 + 30s 延迟 + 失败重启，与 DSH 自身自启机制一致，随登录自动拉起）；deploy/uninstall/check-status 同步，移除旧 Startup 条目防双开
 - v2.1.0：进度推送节流（`progressIntervalMs`，默认 60s，原 8s）；新增按需进度查询（`进度`/`进展` 等，处理中立即回推）；任务进行中再发自然语言不再并行开会话，改为忙碌提示 + 当前进度
 - v2.0.0：可移植部署版——所有脚本改为按自身目录推断路径；新增 `deploy.ps1`/`uninstall.ps1`；自然语言任务带确认 + 8s 进度心跳；SKILL.md 改为从零部署手册
 - v1.0.0：初版——http://常驻桥、只读命令、watchdog 自愈、登录自启

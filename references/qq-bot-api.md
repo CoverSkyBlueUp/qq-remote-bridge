@@ -169,7 +169,11 @@ const unsubSteps = ctx.on("session/event", (_session, event) => {
       const blocks = event?.data?.message?.content ?? [];
       const think = blocks.filter(b => b.type === "thinking" || b.type === "reasoning")
                           .map(b => b.text ?? b.thinking ?? "").join("");
-      if (think.trim()) process.stdout.write(`[STEP] 推理: ${think.trim()}\n`);
+      if (think.trim()) {
+        // 必须折叠为单行：多行思考会让桥的行解析把续行当作"结论"混入最终回复
+        const oneLine = think.trim().replace(/\s+/g, " ").slice(0, 150);
+        process.stdout.write(`[STEP] 推理: ${oneLine}\n`);
+      }
     } else if (String(t).startsWith("tool/")) {
       process.stdout.write(`[STEP] 工具: ${t}\n`);
     } else if (t === "turn/start") {
@@ -182,9 +186,43 @@ await agent.whenIdle();
 unsubSteps?.();
 ```
 
-**验证**：跑任意 headless 任务，stdout 应出现 `[STEP] 推理: ...` / `[STEP] 工具: tool/call`。
+**验证**：跑任意 headless 任务，stdout 应出现单行 `[STEP] 推理: ...` / `[STEP] 工具: tool/call`，最终结论文本单独一行。
 
 **注意事项**：
 - 补丁在 `profiles/node_modules` 下，**DSH 升级 / pnpm 重装会被覆盖**，需重新打
 - 该补丁会让**所有** headless 调用在 stdout 输出 `[STEP]` 行（不影响最终结论文本输出，最终文本在 `[STEP]` 之后单独一行）
 - daemon 已实现**自动退化**：若 stdout 无 `[STEP]`（补丁缺失），进度回退为按 `progressIntervalMs`（默认 60s）的时间心跳，功能不受影响
+- v2.1.2 起，daemon **不会**把 `[STEP] 推理` 内容推送给用户（进度只回推工具动作），且从最终回复中剥离所有 `[STEP]` 行——推理折叠单行是防止多行污染的关键
+
+## 9. headless 沙箱配置（浏览器等跨沙箱工具）
+
+**背景**：headless 会话默认 `workspace-write` 沙箱会拒绝启动工作区外的程序（如 web-access 的 `msedge.exe`），agent 请求升级 `danger-full-access` 时 headless 无交互审批者，审批结果 `unavailable`，浏览器路线直接卡死（实测踩坑：热点查询任务因无法启动 Edge 停滞约 3 分钟）。
+
+**推荐配置**：把 headless profile 设为「全盘可写 + 带确认」（sandbox `danger-full-access` + approval `ask`）。编辑 `%USERPROFILE%\.dsh\profiles\headless\cordis.patch.yml`：
+
+```yaml
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+    workspaceRoot: !!js process.cwd()
+- id: approval
+  config:
+    policy: ask
+```
+
+（可选）与 web profile 对齐的预设表（`full-access-ask` = 全盘可写带确认）：
+
+```yaml
+- id: permission
+  config:
+    presets:
+      read-only:        { sandbox: read-only,         approval: ask }
+      workspace-write:  { sandbox: workspace-write,   approval: ask }
+      danger-full-access:{ sandbox: danger-full-access, approval: never }
+      full-access-ask:  { sandbox: danger-full-access, approval: ask }
+```
+
+**注意**：
+- 该策略是纯模式制（无路径放行表），`danger-full-access` 即等效放行一切程序与路径
+- 全盘可写意味着 agent 可读写全盘，请仅在可信的常驻远程控制场景使用；普通操作不再触发审批，「带确认」仅作敏感操作的兜底
+- 修改对每个新 headless 任务即时生效（无需重启 daemon）

@@ -67,12 +67,30 @@ Write-Step "配置已写入: $ConfigPath"
 Write-Step "  appId=$($cfg.appId)"
 Write-Step "  authorizedOpenids=$($cfg.authorizedOpenids -join ',')"
 
-# ---- 2) login autostart registration -------------------------------------
-if (Test-Path $Launcher) {
-  Copy-Item $Launcher $StartupLink -Force
-  Write-Step "登录自启已注册: $StartupLink"
+# ---- 2) login autostart registration (scheduled task at logon) ------------
+# A logon-triggered scheduled task (same mechanism DSH itself uses) runs the
+# watchdog at logon; the watchdog starts the daemon and keeps it alive. The
+# task also restarts the watchdog if it fails, and StartWhenAvailable covers
+# a missed logon trigger. An old Startup-folder entry is removed to avoid
+# double-start.
+$TaskName = "DSH_QQ_Remote_Bridge"
+$Watchdog = Join-Path $Dir "qq_bridge_watchdog.ps1"
+$Startup = [Environment]::GetFolderPath('Startup')
+$StartupLink = Join-Path $Startup "DSH_QQ_Remote_Bridge.cmd"
+if (Test-Path $StartupLink) {
+  Remove-Item $StartupLink -Force -ErrorAction SilentlyContinue
+  Write-Step "已移除旧启动文件夹条目: $StartupLink"
+}
+if (Test-Path $Watchdog) {
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Watchdog`""
+  $trigger = New-ScheduledTaskTrigger -AtLogOn
+  $trigger.Delay = "PT30S"
+  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "QQ remote bridge: keep qq_remote_bridge daemon alive; starts with DSH at logon" -Force | Out-Null
+  Write-Step "登录自启已注册（计划任务）: $TaskName（随登录启动，30s 延迟）"
 } else {
-  Write-Host "未找到 launcher: $Launcher" -ForegroundColor Yellow
+  Write-Host "未找到 watchdog: $Watchdog" -ForegroundColor Yellow
 }
 
 # ---- 3) start daemon + watchdog ------------------------------------------

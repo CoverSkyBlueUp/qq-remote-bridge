@@ -43,7 +43,11 @@ if (Test-Path $log) {
 }
 
 Write-Host ""
-Write-Host "[4] startup registration:"
-$startup = [Environment]::GetFolderPath('Startup')
-$reg = Join-Path $startup "DSH_QQ_Remote_Bridge.cmd"
-Write-Host "  $reg -> exists: $(Test-Path $reg)"
+Write-Host "[4] startup registration (logon scheduled task):"
+$task = Get-ScheduledTask -TaskName "DSH_QQ_Remote_Bridge" -ErrorAction SilentlyContinue
+if ($task) {
+  $info = $task | Get-ScheduledTaskInfo
+  Write-Host "  DSH_QQ_Remote_Bridge -> state=$($task.State), lastRun=$($info.LastRunTime), nextRun=$($info.NextRunTime)"
+} else {
+  Write-Host "  DSH_QQ_Remote_Bridge -> NOT REGISTERED"
+}
