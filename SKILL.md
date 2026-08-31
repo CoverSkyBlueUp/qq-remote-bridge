@@ -26,6 +26,7 @@ metadata:
 - 自动获取/刷新 `access_token`（7200s，提前 60s 刷新）
 - **仅响应授权 openid** 的单聊消息
 - **白名单只读命令**直接执行（`help`/`ls`/`ps`/`ipconfig`/`systeminfo` 等）
+- **中断指令**（`中断`/`取消`/`停止`/`stop`/`cancel`/`abort`/`halt`）→ 真正地**杀掉正在运行的 headless 任务**，而非新开一个
 - **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中每 8 秒发进度心跳**，结束发结论
 - 断线自动重连、心跳保活；由 `watchdog` 保证 daemon 崩溃自愈；由登录启动项自动拉起
 - `showWindow`/wscript 无窗口运行，不弹控制台
@@ -34,6 +35,9 @@ metadata:
 1. ✅ 已收到，正在新建会话处理你的请求，请稍候…
 2. ⏳ 仍在处理中，已运行 8s / 16s / 24s …（每 8 秒）
 3. （最终结论）
+
+### 中断
+处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可立即杀掉正在运行的 agent 任务并收到「✅ 已中断」。中断指令不会新建会话、不先发 ack。无运行任务时回「当前没有正在运行的任务」。
 
 ---
 
@@ -80,7 +84,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -C
 powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 ```
 - 日志出现 `WS READY session=...` 即上线
-- 用你的 QQ 私聊机器人发 `help` → 应收到「可用只读命令…」
+- 用你的 QQ 私聊机器人发 `help` → 应收到「🤖 QQ 远程控制 · 指令菜单」分组菜单
 - 发一条自然语言（如「查一下当前时间」）→ 应收到 ack + 进度心跳 + 结论
 
 ## 五、日常运维

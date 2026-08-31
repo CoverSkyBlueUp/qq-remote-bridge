@@ -6,7 +6,7 @@
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 
 const CONFIG_PATH = path.join(__dirname, "qq_bridge_config.json");
 const LOG_PATH = path.join(__dirname, "qq_remote_bridge.log");
@@ -168,6 +168,10 @@ const DSH_BIN = (() => {
 const HEADLESS_TIMEOUT = 300000; // 5 min cap for a full agent run
 const PROGRESS_INTERVAL = 8000;  // 8s progress heartbeat
 
+// The currently running headless child process, so an interrupt command can
+// kill it. Only one headless task may run at a time.
+let activeHeadless = null;
+
 function runHeadlessSession(task, onProgress) {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -178,23 +182,53 @@ function runHeadlessSession(task, onProgress) {
     }, PROGRESS_INTERVAL);
 
     const args = [DSH_BIN, "--profile", "headless", task];
-    execFile(process.execPath, args, {
-      timeout: HEADLESS_TIMEOUT,
+    const child = spawn(process.execPath, args, {
       windowsHide: true,
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024
-    }, (err, stdout, stderr) => {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    activeHeadless = child;
+
+    let out = "";
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
       clearInterval(progressTimer);
-      let out = "";
-      if (stdout) out += stdout;
-      if (err) {
-        const detail = err.killed ? "（超时中断）" : ("（" + (err.code || err.message) + "）");
-        if (stderr) out += "\n[stderr] " + stderr;
-        if (!out.trim()) out = "[headless 会话失败] " + detail;
-      }
+      if (activeHeadless === child) activeHeadless = null;
       resolve(out.trim() || "[agent 未返回结论]");
+    };
+
+    child.stdout.on("data", c => { out += c.toString("utf8"); });
+    child.stderr.on("data", c => { out += c.toString("utf8"); });
+
+    const killTimer = setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch (_) {}
+    }, HEADLESS_TIMEOUT);
+
+    child.on("error", err => {
+      clearTimeout(killTimer);
+      if (!out.trim()) out = "[headless 会话失败] " + (err.message || String(err));
+      finish();
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(killTimer);
+      if (code === null || signal) {
+        if (!out.trim()) out = "[已中断]";
+        else out = "[已中断] " + out.trim();
+      }
+      finish();
     });
   });
+}
+
+// Interrupt words: telling the daemon to abort the running headless turn.
+// These are matched first (before whitelist / danger checks) so they never
+// spawn a new session.
+const INTERRUPT_WORDS = new Set(["中断", "取消", "停止", "stop", "cancel", "abort", "halt"]);
+function isInterrupt(cmd) {
+  const t = cmd.trim().toLowerCase();
+  return INTERRUPT_WORDS.has(t) || INTERRUPT_WORDS.has(t.replace(/[。.!！]/g, ""));
 }
 
 function isAllowed(cmd) {
@@ -205,9 +239,42 @@ function isAllowed(cmd) {
 async function execute(cmd, onProgress) {
   const trimmed = cmd.trim();
   if (!trimmed) return "[empty]";
+
+  // Interrupt command: kill the running headless task (if any), and do NOT
+  // start a new one. Recognized words trigger an abort of the current turn.
+  if (isInterrupt(trimmed)) {
+    if (activeHeadless && !activeHeadless.killed) {
+      try { activeHeadless.kill("SIGTERM"); } catch (_) {}
+      // Give it a moment then force if needed
+      setTimeout(() => {
+        if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} }
+      }, 1500);
+      return "✅ 已中断当前正在运行的任务。";
+    }
+    return "当前没有正在运行的任务。";
+  }
+
   const first = trimmed.split(/\s+/)[0].toLowerCase();
   if (first === "help") {
-    return "可用只读命令: " + Array.from(ALLOWED).join(", ") + "\n示例: ls C:\\  ps  ipconfig  systeminfo  whoami  ver\n\n其他任何明确文字（自然语言指令）将转交 DSH agent 新会话处理。";
+    return [
+      "🤖 QQ 远程控制 · 指令菜单",
+      "━━━━━━━━━━━━━━━━━━",
+      "📂 目录 / 信息",
+      "  ls / dir  列目录  例: ls C:\\",
+      "  pwd / cwd 当前目录",
+      "  ps / tasklist  进程列表",
+      "  ipconfig  网络配置",
+      "  systeminfo  系统信息",
+      "  whoami  当前用户",
+      "  hostname / ver / date / time",
+      "  echo  <词>  回显",
+      "━━━━━━━━━━━━━━━━━━",
+      "🛑 中断当前任务",
+      "  中断 / 取消 / stop / cancel / abort",
+      "━━━━━━━━━━━━━━━━━━",
+      "💬 其它明确文字 = 转交 AI agent 处理",
+      "  先确认 → 每 8 秒进度 → 回结论"
+    ].join("\n");
   }
   if (isAllowed(trimmed)) {
     if (stripDangerous(trimmed)) {
@@ -285,9 +352,11 @@ async function handleEvent(d, t) {
   }
   log(`CMD openid=${openid} content=` + JSON.stringify(content));
 
-  // Natural-language (non-whitelist) tasks first send an immediate
-  // acknowledgment so the user knows a new session is running.
-  if (!isWhitelistCommand(content)) {
+  // Natural-language (non-whitelist, non-interrupt) tasks first send an
+  // immediate acknowledgment so the user knows a new session is running.
+  // Interrupt commands are NOT acknowledged as a new session and are handled
+  // directly by execute().
+  if (!isWhitelistCommand(content) && !isInterrupt(content)) {
     try {
       const ack = "✅ 已收到，正在新建会话处理你的请求，请稍候…\n（处理过程中我会定期发送进度）";
       await replyToUser(openid, msgId, ack, nextMsgSeq(msgId));
