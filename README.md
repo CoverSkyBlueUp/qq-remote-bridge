@@ -9,7 +9,8 @@
 - **常驻守护**：WebSocket 连接 QQ 开放平台网关，自动获取 / 刷新 `access_token`（7200s，提前 60s 刷新），断线自动重连、心跳保活
 - **仅响应授权 openid**：只有配置的 `authorizedOpenids` 里的单聊消息才会被处理
 - **白名单只读命令**：`help` / `ls` / `dir` / `ps` / `tasklist` / `ipconfig` / `systeminfo` / `whoami` / `hostname` / `ver` / `date` / `time` / `echo` 等，直接执行并返回（`help` 显示分组菜单）
-- **自然语言 → DSH agent 会话**：任何非白名单的明确文字，转交 DSH `headless` 新会话处理（标准模式 + `workspace-write` + 默认工作区），先发送确认消息，**处理过程中流式回推真实执行步骤**（推理 / 工具调用），结束回推结论
+- **自然语言 → DSH agent 会话**：任何非白名单的明确文字，转交 DSH `headless` 新会话处理（标准模式 + `workspace-write` + 可配置工作区，默认 `%USERPROFILE%\dsh-qqbot-workspace`），先发送确认消息，**处理过程中按节流间隔回推真实执行步骤**（推理 / 工具调用），结束回推结论
+- **进度节流 + 按需查询**：进度推送至少间隔 `progressIntervalMs`（默认 60s）；任务进行中发 `进度` / `进展` / `进行到哪` / `还在吗` 等可**立即**收到当前进度，不会新建会话
 - **中断当前任务**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可**真正杀掉**正在运行的 agent 任务（而非再开一个）
 - **崩溃自愈**：`watchdog` 每 30s 检查 daemon，异常自动重启
 - **登录自启**：注册进用户 Startup 目录，Windows 登录后自动拉起
@@ -17,12 +18,13 @@
 
 ### 消息流（自然语言任务）
 
-1. ✅ 已收到，正在新建会话处理你的请求，请稍候…
-2. ⚙️ 推理: <agent 真实思考> / ⚙️ 工具: tool/call…（`[STEP]` 流式实时回推，见「headless 步骤补丁」）
-3. （兜底：长时间无新步骤时发「⏳ 仍在处理中」心跳）
-4. （最终结论）
+1. ✅ 已收到，正在新建会话处理你的请求，请稍候…（发「进度」可随时查询，「中断」可停止）
+2. ⚙️ 推理 / ⚙️ 工具: …（`[STEP]` 步骤，受 `progressIntervalMs` 节流，默认 ≥60s 一条）
+3. （兜底：无新步骤时按 `progressIntervalMs` 发「⏳ 仍在处理中」心跳）
+4. 处理中发 `进度` 等查询词 → 立即回推当前任务 / 已运行秒数 / 最近步骤（不新建会话）
+5. （最终结论）
 
-> 真实步骤依赖对 `dsh-headless` 插件的本地补丁（见 `references/qq-bot-api.md` 第 8 节）；DSH 升级会覆盖，需重打；补丁缺失时自动退化为 8s 时间心跳。
+> 真实步骤依赖对 `dsh-headless` 插件的本地补丁（见 `references/qq-bot-api.md` 第 8 节）；DSH 升级会覆盖，需重打；补丁缺失时自动退化为按 `progressIntervalMs`（默认 60s）时间心跳。
 
 ## 前置条件
 
@@ -45,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 `
   -AppId <APPID> -ClientSecret <SECRET> -OpenId <USER_OPENID>
 ```
 
-若 `dsh` 装在非默认路径，可加 `-DshBin "C:\...\dsh\lib\bin.js"`。脚本会：
+若 `dsh` 装在非默认路径，可加 `-DshBin "C:\...\dsh\lib\bin.js"`；工作区可用 `-Workspace "D:\my-workspace"` 覆盖（默认 `%USERPROFILE%\dsh-qqbot-workspace`）。脚本会：
 1. 生成 `qq_bridge_config.json`
 2. 把 `qq_remote_bridge_launch.cmd` 注册进用户 Startup 目录（登录自启）
 3. 启动 daemon + watchdog
@@ -84,7 +86,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 | `ps` / `tasklist` | 进程列表 |
 | `ipconfig` / `systeminfo` / `whoami` / `ver` | 系统信息 |
 | `echo <词>` | 回显 |
-| 任意自然语言 | 转交 DSH agent 新会话处理 |
+| 任意自然语言 | 转交 DSH agent 新会话处理（工作区见 `workspace` 配置） |
+| `进度` / `进展` / `还在吗` | 任务进行中立即查询当前进度 |
+| `中断` / `取消` / `stop` | 终止正在运行的 agent 任务 |
 
 ## 日常运维
 
@@ -95,6 +99,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 | 停止 | `uninstall.ps1 -KeepConfig` |
 | 完全卸载 | `uninstall.ps1` |
 | 看日志 | 安装目录下 `qq_remote_bridge.log` / `qq_remote_bridge_watchdog.log` |
+| 发主动消息 | `node send_active_msg.js "你好，世界"`（利用配置里的 openid） |
 
 自定义命令：编辑 `qq_remote_bridge.js` 中的 `ALLOWED`（只读白名单）与 `DANGEROUS`（危险关键字正则）。
 

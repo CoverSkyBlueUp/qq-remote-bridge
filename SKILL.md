@@ -7,7 +7,7 @@ description:
   触发场景：用户要求部署/接入腾讯或 QQ 机器人、重装系统后重新部署、通过 QQ 发指令查询本机、排查机器人收不到/回不了消息、启动/停止/卸载 QQ 桥。
 metadata:
   author: CoverSkyBlueUp
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # qq-remote-bridge Skill（可分享部署版）
@@ -27,20 +27,25 @@ metadata:
 - **仅响应授权 openid** 的单聊消息
 - **白名单只读命令**直接执行（`help`/`ls`/`ps`/`ipconfig`/`systeminfo` 等）
 - **中断指令**（`中断`/`取消`/`停止`/`stop`/`cancel`/`abort`/`halt`）→ 真正地**杀掉正在运行的 headless 任务**，而非新开一个
-- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中流式回推真实执行步骤**（推理/工具调用，来自 headless 插件补丁的 `[STEP]` 事件），结束发结论
+- **非白名单自然语言** → 转交 DSH headless 新会话处理（标准模式 + workspace-write + 默认工作区），先发确认消息，**过程中按节流间隔回推真实执行步骤**（推理/工具调用，来自 headless 插件补丁的 `[STEP]` 事件），结束发结论
+- **进度节流 + 按需查询**：进度推送至少间隔 `progressIntervalMs`（默认 60s，配置可调）；任务进行中发 `进度`/`进展`/`进行到哪`/`还在吗` 等可**立即**收到当前进度回推，不会新建会话
 - 断线自动重连、心跳保活；由 `watchdog` 保证 daemon 崩溃自愈；由登录启动项自动拉起
 - `showWindow`/wscript 无窗口运行，不弹控制台
 
 ### 消息流（自然语言任务）
-1. ✅ 已收到，正在新建会话处理你的请求，请稍候…
-2. ⚙️ 推理: <agent 的真实思考> / ⚙️ 工具: tool/call…（`[STEP]` 流式实时回推）
-3. （兜底：长时间无新步骤时发「⏳ 仍在处理中」心跳）
-4. （最终结论）
+1. ✅ 已收到，正在新建会话处理你的请求，请稍候…（发「进度」可随时查询，「中断」可停止）
+2. ⚙️ 推理 / ⚙️ 工具: …（`[STEP]` 步骤，受 `progressIntervalMs` 节流，默认 ≥60s 一条）
+3. （兜底：无新步骤时按 `progressIntervalMs` 发「⏳ 仍在处理中」心跳）
+4. 处理中发 `进度` 等查询词 → 立即回推当前任务/已运行秒数/最近步骤（不新建会话）
+5. （最终结论）
 
-> **真实步骤依赖 headless 补丁**：`[STEP]` 由对 `dsh-headless` 插件的本地补丁产生（`run()` 中 `ctx.on("session/event")` 监听，将推理/工具事件打印到 stdout，见 `references/qq-bot-api.md` 的「headless 步骤补丁」）。DSH 升级会覆盖此补丁，需重新打。若补丁缺失，daemon 自动退化为每 8 秒时间心跳。
+> **真实步骤依赖 headless 补丁**：`[STEP]` 由对 `dsh-headless` 插件的本地补丁产生（`run()` 中 `ctx.on("session/event")` 监听，将推理/工具事件打印到 stdout，见 `references/qq-bot-api.md` 的「headless 步骤补丁」）。DSH 升级会覆盖此补丁，需重新打。若补丁缺失，daemon 自动退化为按 `progressIntervalMs` 的时间心跳。
 
 ### 中断
 处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可立即杀掉正在运行的 agent 任务并收到「✅ 已中断」。中断指令不会新建会话、不先发 ack。无运行任务时回「当前没有正在运行的任务」。
+
+### 按需进度
+处理中发 `进度` / `进展` / `进行到哪` / `还在吗` / `status` / `progress` 可立即收到当前任务、已运行秒数与最近步骤（不新建会话）。任务进行中再发其它自然语言，会收到「⚠️ 上一任务仍在处理中」+ 当前进度，而不是并行开第二个会话。
 
 ---
 
@@ -124,5 +129,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 
 ## 八、版本记录
 
+- v2.1.0：进度推送节流（`progressIntervalMs`，默认 60s，原 8s）；新增按需进度查询（`进度`/`进展` 等，处理中立即回推）；任务进行中再发自然语言不再并行开会话，改为忙碌提示 + 当前进度
 - v2.0.0：可移植部署版——所有脚本改为按自身目录推断路径；新增 `deploy.ps1`/`uninstall.ps1`；自然语言任务带确认 + 8s 进度心跳；SKILL.md 改为从零部署手册
 - v1.0.0：初版——http://常驻桥、只读命令、watchdog 自愈、登录自启

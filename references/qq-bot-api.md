@@ -187,4 +187,4 @@ unsubSteps?.();
 **注意事项**：
 - 补丁在 `profiles/node_modules` 下，**DSH 升级 / pnpm 重装会被覆盖**，需重新打
 - 该补丁会让**所有** headless 调用在 stdout 输出 `[STEP]` 行（不影响最终结论文本输出，最终文本在 `[STEP]` 之后单独一行）
-- daemon 已实现**自动退化**：若 stdout 无 `[STEP]`（补丁缺失），进度回退为每 8 秒时间心跳，功能不受影响
+- daemon 已实现**自动退化**：若 stdout 无 `[STEP]`（补丁缺失），进度回退为按 `progressIntervalMs`（默认 60s）的时间心跳，功能不受影响

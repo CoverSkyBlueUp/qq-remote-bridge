@@ -2,10 +2,12 @@
   "appId": "<APPID>",
   "clientSecret": "<CLIENT_SECRET>",
   "authorizedOpenids": ["<USER_OPENID>"],
+  "workspace": "<WORKSPACE_DIR>",
   "gateway": "wss://api.sgroup.qq.com/websocket",
   "apiHost": "api.bot.qq.com",
   "tokenHost": "bots.qq.com",
   "replyContentLimit": 1500,
-  "commandTimeoutMs": 20000
+  "commandTimeoutMs": 20000,
+  "progressIntervalMs": 60000
 }
 

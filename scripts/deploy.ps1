@@ -5,6 +5,10 @@
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 -AppId <APPID> -ClientSecret <SECRET> -OpenId <USER_OPENID>
 #   powershell ... -File deploy.ps1            # reuse existing qq_bridge_config.json if present
+# Optional: -Workspace <dir> sets the working directory of every natural-language
+# headless session (default: %USERPROFILE%\dsh-qqbot-workspace). -DshBin <path>
+# overrides the dsh CLI entry.
+# -ProgressIntervalMs <ms> sets the minimum gap between progress pushes (default 60000).
 #
 # It: (1) writes qq_bridge_config.json, (2) registers the launcher in the user
 # Startup folder for login autostart, (3) starts the daemon + watchdog.
@@ -12,7 +16,9 @@ param(
   [string]$AppId,
   [string]$ClientSecret,
   [string]$OpenId,
-  [string]$DshBin
+  [string]$DshBin,
+  [string]$Workspace,
+  [int]$ProgressIntervalMs
 )
 
 $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -36,11 +42,15 @@ if ($OpenId) {
   elseif ($cfg.authorizedOpenids -notcontains $OpenId) { $cfg.authorizedOpenids += $OpenId }
 }
 if ($DshBin) { $cfg.dshBin = $DshBin }
+if ($Workspace) { $cfg.workspace = $Workspace }
+if (-not $cfg.workspace) { $cfg.workspace = Join-Path $env:USERPROFILE "dsh-qqbot-workspace" }
 if (-not $cfg.gateway) { $cfg.gateway = "wss://api.sgroup.qq.com/websocket" }
 if (-not $cfg.apiHost) { $cfg.apiHost = "api.bot.qq.com" }
 if (-not $cfg.tokenHost) { $cfg.tokenHost = "bots.qq.com" }
 if (-not $cfg.replyContentLimit) { $cfg.replyContentLimit = 1500 }
 if (-not $cfg.commandTimeoutMs) { $cfg.commandTimeoutMs = 20000 }
+if ($ProgressIntervalMs) { $cfg.progressIntervalMs = $ProgressIntervalMs }
+if (-not $cfg.progressIntervalMs) { $cfg.progressIntervalMs = 60000 }
 
 # Validate required fields
 if (-not $cfg.appId -or -not $cfg.clientSecret) {

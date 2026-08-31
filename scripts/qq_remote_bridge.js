@@ -20,6 +20,10 @@ const API_HOST = config.apiHost;
 const TOKEN_HOST = config.tokenHost;
 const REPLY_LIMIT = config.replyContentLimit || 1500;
 const CMD_TIMEOUT = config.commandTimeoutMs || 20000;
+// Workspace for every natural-language headless session: all conversations
+// spawned by the bridge run inside this directory (the headless runner uses
+// process.cwd() as the agent workspace). Portable default: %USERPROFILE%\dsh-qqbot-workspace.
+const WORKSPACE = config.workspace || path.join(require("os").homedir(), "dsh-qqbot-workspace");
 const INTENTS = 33554432; // GROUP_AND_C2C_EVENT (1<<25)
 
 // ---- logging -------------------------------------------------------------
@@ -166,15 +170,48 @@ const DSH_BIN = (() => {
   return "dsh"; // let PATH resolve it
 })();
 const HEADLESS_TIMEOUT = 300000; // 5 min cap for a full agent run
-const PROGRESS_INTERVAL = 8000;  // 8s progress heartbeat
+// Progress pushes are throttled to at most one per PROGRESS_INTERVAL
+// (configurable via "progressIntervalMs"; default 60s, was a fixed 8s).
+// Users can always get an immediate update by sending a progress-query word
+// (e.g. 进度) while a task is running.
+const PROGRESS_INTERVAL = config.progressIntervalMs || 60000;
 
 // The currently running headless child process, so an interrupt command can
 // kill it. Only one headless task may run at a time.
 let activeHeadless = null;
+// State of the currently running headless task, used for on-demand progress
+// pushes when the user messages the bot while a task is running.
+let activeTask = null; // { text, startedAt, lastStep }
+// Timestamp of the last push (ack or progress); progress pushes are throttled
+// to at most one per PROGRESS_INTERVAL.
+let lastProgressAt = 0;
+
+// Progress-query words: while a task is running, these get an immediate
+// on-demand progress push instead of starting a new session.
+const PROGRESS_QUERY_WORDS = ["进度", "进展", "进行到哪", "还在吗", "查询进度", "进度查询", "status", "progress"];
+function isProgressQuery(cmd) {
+  const t = cmd.trim().toLowerCase();
+  return PROGRESS_QUERY_WORDS.some(w => t.includes(w));
+}
+
+function progressStatus() {
+  if (!activeTask) return "当前没有正在运行的任务。";
+  const secs = Math.round((Date.now() - activeTask.startedAt) / 1000);
+  const last = activeTask.lastStep ? "\n最近步骤: " + activeTask.lastStep.slice(0, 100) : "";
+  return "⏳ 正在处理「" + activeTask.text.slice(0, 40) + "」,已运行 " + secs + " 秒。" + last + "\n(发「中断」可停止当前任务)";
+}
 
 function runHeadlessSession(task, onProgress) {
   return new Promise(resolve => {
     const startedAt = Date.now();
+    // Track task state for on-demand progress queries while it runs.
+    activeTask = { text: task, startedAt, lastStep: "" };
+    // Every natural-language task runs inside the configured workspace. The
+    // headless runner uses process.cwd() as the agent workspace, so spawning
+    // dsh with this cwd directs the whole conversation to that directory.
+    const ws = WORKSPACE;
+    try { fs.mkdirSync(ws, { recursive: true }); } catch (_) {}
+    log("HEADLESS task=" + JSON.stringify(task.slice(0, 120)) + " workspace=" + ws);
     // Fallback heartbeat (only when no [STEP] lines arrive). [STEP] lines
     // streamed by the patched headless carry real steps; we prefer those.
     const progressTimer = setInterval(() => {
@@ -185,6 +222,7 @@ function runHeadlessSession(task, onProgress) {
 
     const args = [DSH_BIN, "--profile", "headless", task];
     const child = spawn(process.execPath, args, {
+      cwd: ws,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -197,24 +235,27 @@ function runHeadlessSession(task, onProgress) {
       settled = true;
       clearInterval(progressTimer);
       if (activeHeadless === child) activeHeadless = null;
+      if (activeTask && activeTask.startedAt === startedAt) activeTask = null;
       resolve(out.trim() || "[agent 未返回结论]");
     };
 
     // Accumulate non-STEP stdout/stderr (the final conclusion). [STEP] lines
-    // are real intermediate steps -> forward to onProgress as live updates.
+    // are real intermediate steps -> forward to onProgress as live updates
+    // and strip them from the accumulated output so the final reply is the
+    // agent's conclusion only.
     let stepAccum = "";
     const handleChunk = (c) => {
       const s = c.toString("utf8");
-      out += s;
       stepAccum += s;
       const lines = stepAccum.split("\n");
       stepAccum = lines.pop(); // keep partial last line
       for (const ln of lines) {
         const m = ln.match(/^\[STEP\]\s*(.*)$/);
         if (m && onProgress) {
+          if (activeTask) activeTask.lastStep = m[1].trim();
           try { onProgress({ kind: "step", text: m[1].trim() }); } catch (_) {}
         } else if (ln.trim()) {
-          // non-step output; ignore for progress (might be final text tail)
+          out += ln + "\n";
         }
       }
     };
@@ -274,6 +315,16 @@ async function execute(cmd, onProgress) {
     return "当前没有正在运行的任务。";
   }
 
+  // While a task is running, a new message must NOT spawn a second concurrent
+  // headless session: progress-query words get an immediate on-demand push,
+  // other natural language gets a busy notice with the current progress.
+  if (activeHeadless && !activeHeadless.killed) {
+    if (isProgressQuery(trimmed)) return progressStatus();
+    if (!isWhitelistCommand(trimmed)) {
+      return "⚠️ 上一任务仍在处理中,暂不新建会话。\n" + progressStatus();
+    }
+  }
+
   const first = trimmed.split(/\s+/)[0].toLowerCase();
   if (first === "help") {
     return [
@@ -290,7 +341,8 @@ async function execute(cmd, onProgress) {
       "  echo  <词>  回显",
       "━━━━━━━━━━━━━━━━━━",
       "💬 其它明确文字 = 转交 AI agent 处理",
-      "  先确认 → 每 8 秒进度 → 回结论",
+      "  先确认 → 定期进度(约60秒) → 回结论",
+      "  处理中发「进度」可立即查询当前进展",
       "━━━━━━━━━━━━━━━━━━",
       "🛑 中断当前任务",
       "  中断 / 取消 / stop / cancel / abort"
@@ -378,8 +430,9 @@ async function handleEvent(d, t) {
   // directly by execute().
   if (!isWhitelistCommand(content) && !isInterrupt(content)) {
     try {
-      const ack = "✅ 已收到，正在新建会话处理你的请求，请稍候…\n（处理过程中我会定期发送进度）";
+      const ack = "✅ 已收到，正在新建会话处理你的请求，请稍候…\n（发「进度」可随时查询进展，「中断」可停止）";
       await replyToUser(openid, msgId, ack, nextMsgSeq(msgId));
+      lastProgressAt = Date.now();
     } catch (e) {
       log("ACK REPLY ERROR " + e.message);
     }
@@ -387,19 +440,23 @@ async function handleEvent(d, t) {
 
   // Live progress updates while the agent runs, sent on the same msg_id with
   // increasing msg_seq. Real steps (from [STEP] lines) are preferred; a plain
-  // tick is a fallback heartbeat with elapsed seconds.
+  // tick is a fallback heartbeat with elapsed seconds. All pushes are
+  // throttled to at most one per PROGRESS_INTERVAL so the bot does not spam;
+  // the user can always pull an immediate update with a progress-query word.
   const onProgress = async (p) => {
     try {
+      const now = Date.now();
+      if (now - lastProgressAt < PROGRESS_INTERVAL) return; // throttled
       let note;
       if (p && p.kind === "step") {
         const text = String(p.text || "").slice(0, 120);
         note = "⚙️ " + (text || "正在执行…");
       } else {
-        const secs = p && p.secs ? p.secs : Math.round((Date.now() - lastProgressAt) / 1000);
-        note = "⏳ 仍在处理中…";
+        const secs = p && p.secs ? p.secs : Math.round((now - lastProgressAt) / 1000);
+        note = "⏳ 仍在处理中…(已运行 " + secs + " 秒,发「进度」可查询详情)";
       }
       await replyToUser(openid, msgId, note, nextMsgSeq(msgId));
-      lastProgressAt = Date.now();
+      lastProgressAt = now;
     } catch (e) {
       log("PROGRESS REPLY ERROR " + e.message);
     }
