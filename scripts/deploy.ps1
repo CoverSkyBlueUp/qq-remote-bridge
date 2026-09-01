@@ -52,6 +52,8 @@ if (-not $cfg.commandTimeoutMs) { $cfg.commandTimeoutMs = 20000 }
 if ($ProgressIntervalMs) { $cfg.progressIntervalMs = $ProgressIntervalMs }
 if (-not $cfg.progressIntervalMs) { $cfg.progressIntervalMs = 60000 }
 if ($null -eq $cfg.startupGreeting) { $cfg.startupGreeting = $true }
+if ($null -eq $cfg.autoSplitTasks) { $cfg.autoSplitTasks = $true }
+if ($null -eq $cfg.netTaskAsk) { $cfg.netTaskAsk = $true }
 
 # Validate required fields
 if (-not $cfg.appId -or -not $cfg.clientSecret) {
@@ -75,6 +77,7 @@ Write-Step "  authorizedOpenids=$($cfg.authorizedOpenids -join ',')"
 # a missed logon trigger. An old Startup-folder entry is removed to avoid
 # double-start.
 $TaskName = "DSH_QQ_Remote_Bridge"
+$WatchdogVbs = Join-Path $Dir "qq_bridge_watchdog_silent.vbs"
 $Watchdog = Join-Path $Dir "qq_bridge_watchdog.ps1"
 $Startup = [Environment]::GetFolderPath('Startup')
 $StartupLink = Join-Path $Startup "DSH_QQ_Remote_Bridge.cmd"
@@ -82,16 +85,18 @@ if (Test-Path $StartupLink) {
   Remove-Item $StartupLink -Force -ErrorAction SilentlyContinue
   Write-Step "已移除旧启动文件夹条目: $StartupLink"
 }
-if (Test-Path $Watchdog) {
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Watchdog`""
+# The scheduled task runs wscript with a VBS wrapper: wscript never shows a
+# console, so no PowerShell window (or flash) appears at logon.
+if (Test-Path $WatchdogVbs) {
+  $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$WatchdogVbs`""
   $trigger = New-ScheduledTaskTrigger -AtLogOn
   $trigger.Delay = "PT30S"
   $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "QQ remote bridge: keep qq_remote_bridge daemon alive; starts with DSH at logon" -Force | Out-Null
-  Write-Step "登录自启已注册（计划任务）: $TaskName（随登录启动，30s 延迟）"
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "QQ remote bridge: keep qq_remote_bridge daemon alive (hidden via wscript); starts with DSH at logon" -Force | Out-Null
+  Write-Step "登录自启已注册（计划任务 + wscript 静默）: $TaskName（随登录启动，30s 延迟）"
 } else {
-  Write-Host "未找到 watchdog: $Watchdog" -ForegroundColor Yellow
+  Write-Host "未找到 watchdog 静默启动器: $WatchdogVbs" -ForegroundColor Yellow
 }
 
 # ---- 3) start daemon + watchdog ------------------------------------------
@@ -102,7 +107,11 @@ if (Test-Path $SilentVbs) {
 } else {
   Start-Process -FilePath "node.exe" -ArgumentList "`"$(Join-Path $Dir 'qq_remote_bridge.js')`"" -WorkingDirectory $Dir -WindowStyle Hidden
 }
-Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $Dir 'qq_bridge_watchdog.ps1')`"" -WindowStyle Hidden
+if (Test-Path $WatchdogVbs) {
+  Start-Process -FilePath "wscript.exe" -ArgumentList "`"$WatchdogVbs`"" -WindowStyle Hidden
+} else {
+  Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Watchdog`"" -WindowStyle Hidden
+}
 Start-Sleep -Seconds 8
 
 Write-Step "部署完成。检查日志:"

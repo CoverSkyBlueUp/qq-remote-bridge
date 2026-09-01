@@ -271,3 +271,45 @@ const unsubApproval = ctx.on("approval/request", (_req, _next) => new Promise((r
 - 全盘可写意味着 agent 可读写全盘，请仅在可信的常驻远程控制场景使用；普通操作不再触发审批，「带确认」仅作敏感操作的兜底
 - 恢复安全默认：把 `cordis.patch.yml` 改回 `[]`（或删除提权条目）即可回到 `workspace-write`
 - 修改对每个新 headless 任务即时生效（无需重启 daemon）
+
+## 10. 实战排障手册（本机实测）
+
+### 10.1 headless 子进程永不退出（结论发不出）
+审批 answerer 给 `process.stdin` 加了 `data` 监听后，运行结束事件循环被**打开的 stdin 管道**挂住，`io.exit` 只设 exitCode、靠事件循环自然退出 → 进程挂死，daemon 等不到 close，结论永远不发。
+**修复**：任务结束（`whenIdle` 后）必须 `process.stdin.removeAllListeners("data")` + `process.stdin.destroy()`，并清空挂起审批计时器。
+
+### 10.2 daemon 卡死且日志静默（回复管线挂起）
+`httpJson` 无超时：一次停滞的连接让 `await replyToUser` 永不返回 → 该任务管线永久挂起（daemon 事件循环空转，不再有日志）。
+**修复**：所有 HTTPS 请求 `req.setTimeout(15000, ...)` 失败即 destroy；被拒后由上层 try/catch 继续。
+
+### 10.3 并发双开 + activeHeadless 覆盖（审批串号）
+多条消息的 handleEvent 异步并发：审批/通知的 `await` 间隙内，第二个消息可能通过忙碌检查并 spawn → `activeHeadless` 被后 spawn 覆盖 → 前任务的 `[APPROVAL]` 自动放行被写进**错误子进程** stdin → 审批失败闭合、任务失败。
+**修复**：`taskSlotBusy` 在任务提交执行瞬间（先于任何 await）同步占位；handleEvent / execute / drainTaskQueue 统一检查；任务 finish 时释放。
+
+### 10.4 会话文件是多帧 zstd（解压只得到 147 字节）
+`~/.dsh/sessions/<ws>/<session>/session.jsonl.zstd` 每次追加写一**帧**（实测 129 帧），`zstdDecompressSync` 只解第一帧（仅 manifest）。
+**修复**：按帧魔数 `28 b5 2f fd` 切分，逐帧 `zstdDecompressSync` 后拼接。
+
+### 10.5 PowerShell 的 `curl` 是别名
+`curl` = `Invoke-WebRequest`，`curl -s -X POST --data-raw` 会报"positional parameter"错。
+**修复**：一律 `curl.exe`（agent 曾踩坑后自我纠正，站点经验中应注明）。
+
+### 10.6 原生命令中文乱码（GBK）
+`ipconfig`/`systeminfo` 等原生程序直写 GBK 字节流，`encoding:"utf8"` 解码乱码；PowerShell 的 `[Console]::OutputEncoding=UTF8` 无效。
+**修复**：`execFile(..., {encoding:"buffer"})` 收集原始字节 → 先 UTF-8 严格解码，含 `\uFFFD` 则 `TextDecoder("gbk")` 回退。
+
+### 10.7 PID 复用误判
+Windows 短时间可复用 PID：`Get-Process -Id` 判活可能命中无关新进程。
+**修复**：判活结合命令行特征（`CommandLine -match`）或 pid 文件内容比对。
+
+### 10.8 长回复链接/emoji 跨段
+硬切 1500 字符会切断 URL 与 emoji 代理对。
+**修复**：`splitRespectingUrls`——边界命中 URL 时切到 URL 结束（或段首附近的长 URL 切到其开始）；`charCodeAt(end-1)` 为高代理位（0xD800-0xDBFF）则顺延 1。
+
+### 10.9 `C:\` 根目录写入失败（非沙箱问题）
+普通用户（IsAdmin=False）在系统盘根目录写入被 OS 拒绝（`Access denied`），即使已获 danger-full-access。
+**修复**：agent 应诊断"管理员权限"而非反复重试；提示改用可写目录。
+
+### 10.10 双 daemon（watchdog 与手动启动撞车）
+重启 daemon 时 watchdog 30s 检查可能同时拉起一个 → 双进程双连 QQ 网关（表现为双份问候/双份处理）。
+**修复**：daemon 启动时读 pid 文件，若旧实例存活则自动退出（单例守卫）。

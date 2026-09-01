@@ -9,6 +9,8 @@
   "replyContentLimit": 1500,
   "commandTimeoutMs": 20000,
   "progressIntervalMs": 60000,
-  "startupGreeting": true
+  "startupGreeting": true,
+  "autoSplitTasks": true,
+  "netTaskAsk": true
 }
 
