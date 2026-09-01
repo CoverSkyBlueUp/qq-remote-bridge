@@ -51,6 +51,7 @@ if (-not $cfg.replyContentLimit) { $cfg.replyContentLimit = 1500 }
 if (-not $cfg.commandTimeoutMs) { $cfg.commandTimeoutMs = 20000 }
 if ($ProgressIntervalMs) { $cfg.progressIntervalMs = $ProgressIntervalMs }
 if (-not $cfg.progressIntervalMs) { $cfg.progressIntervalMs = 60000 }
+if ($null -eq $cfg.startupGreeting) { $cfg.startupGreeting = $true }
 
 # Validate required fields
 if (-not $cfg.appId -or -not $cfg.clientSecret) {

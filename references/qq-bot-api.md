@@ -186,6 +186,48 @@ await agent.whenIdle();
 unsubSteps?.();
 ```
 
+**v2.2.0 追加——审批 answerer（权限请求流转）**：在同一补丁中再注册一个 `approval/request` answerer，把审批请求打印为 `[APPROVAL] <pid> <tool> <reason>` 单行，并从 stdin 读取 `approval:allow:<pid>` / `approval:reject:<pid>` 决定；同意时调用 `setSandboxMode(session, "danger-full-access")` 把会话转入全盘可写模式；120 秒未答复自动回落 `unavailable`（fail closed）。需在文件顶部加 `import { setSandboxMode } from "@deepseek-ai/dsh-sandbox-policy";`，并在 `agent.followup(...)` 前插入：
+
+```js
+const pendingApprovals = new Map();
+if (process.stdin && typeof process.stdin.setEncoding === "function") {
+  process.stdin.setEncoding("utf8");
+  let stdinBuf = "";
+  process.stdin.on("data", (chunk) => {
+    stdinBuf += chunk;
+    const lines = stdinBuf.split("\n");
+    stdinBuf = lines.pop() || "";
+    for (const line of lines) {
+      const m = line.trim().match(/^approval:(allow|reject):([A-Za-z0-9]+)$/);
+      if (!m) continue;
+      const settle = pendingApprovals.get(m[2]);
+      if (settle) { pendingApprovals.delete(m[2]); settle(m[1] === "allow" ? "allowed-once" : "rejected"); }
+    }
+  });
+}
+const unsubApproval = ctx.on("approval/request", (_req, _next) => new Promise((resolve) => {
+  try {
+    const pid = Math.random().toString(36).slice(2, 10);
+    const reason = String(_req && _req.reason ? _req.reason : "").replace(/\s+/g, " ").slice(0, 300);
+    const tool = String(_req && _req.toolName ? _req.toolName : "");
+    process.stdout.write(`[APPROVAL] ${pid} ${tool} ${reason}\n`);
+    const timer = setTimeout(() => {
+      if (pendingApprovals.has(pid)) { pendingApprovals.delete(pid); resolve("unavailable"); }
+    }, 120000);
+    pendingApprovals.set(pid, (outcome) => {
+      clearTimeout(timer);
+      if (outcome === "allowed-once") {
+        try { setSandboxMode(_req.agent.session, "danger-full-access"); } catch (_) {}
+      }
+      resolve(outcome);
+    });
+  } catch (_) { resolve("unavailable"); }
+}), { global: true });
+// ...agent.followup(...); await agent.whenIdle(); unsubSteps?.(); unsubApproval?.();
+```
+
+桥侧（daemon）配套：spawn 时 `stdio: ["pipe","pipe","pipe"]`；解析 `[APPROVAL]` 行 → 主动消息询问用户；用户回复「同意/拒绝」→ 向子进程 stdin 写入 `approval:allow/reject:<pid>`；任务结束清空挂起态。daemon 侧逻辑见 `qq_remote_bridge.js` 的「permission-request relay」段。
+
 **验证**：跑任意 headless 任务，stdout 应出现单行 `[STEP] 推理: ...` / `[STEP] 工具: tool/call`，最终结论文本单独一行。
 
 **注意事项**：
@@ -194,11 +236,13 @@ unsubSteps?.();
 - daemon 已实现**自动退化**：若 stdout 无 `[STEP]`（补丁缺失），进度回退为按 `progressIntervalMs`（默认 60s）的时间心跳，功能不受影响
 - v2.1.2 起，daemon **不会**把 `[STEP] 推理` 内容推送给用户（进度只回推工具动作），且从最终回复中剥离所有 `[STEP]` 行——推理折叠单行是防止多行污染的关键
 
-## 9. headless 沙箱配置（浏览器等跨沙箱工具）
+## 9. headless 沙箱配置（安全默认与浏览器等跨沙箱工具）
 
-**背景**：headless 会话默认 `workspace-write` 沙箱会拒绝启动工作区外的程序（如 web-access 的 `msedge.exe`），agent 请求升级 `danger-full-access` 时 headless 无交互审批者，审批结果 `unavailable`，浏览器路线直接卡死（实测踩坑：热点查询任务因无法启动 Edge 停滞约 3 分钟）。
+**安全默认（推荐）**：headless 会话默认 `workspace-write` 沙箱（工作区可写、工作区外受限）+ approval `ask`（带确认）。**无需任何配置**——这是出厂默认，也是远程常驻场景的安全基线：agent 只能读写会话工作区，不能越权。
 
-**推荐配置**：把 headless profile 设为「全盘可写 + 带确认」（sandbox `danger-full-access` + approval `ask`）。编辑 `%USERPROFILE%\.dsh\profiles\headless\cordis.patch.yml`：
+**局限**：`workspace-write` 会拒绝启动工作区外的程序（如 web-access 的 `msedge.exe`），agent 请求升级 `danger-full-access` 时 headless 无交互审批者，审批结果 `unavailable`，浏览器路线会卡死（实测踩坑：热点查询任务因无法启动 Edge 停滞约 3 分钟；无浏览器的 web_search 路线不受影响）。
+
+**可选提权（仅当你确实需要浏览器等跨沙箱工具时）**：把 headless profile 设为「全盘可写 + 带确认」（sandbox `danger-full-access` + approval `ask`）。编辑 `%USERPROFILE%\.dsh\profiles\headless\cordis.patch.yml`：
 
 ```yaml
 - id: sandbox-policy
@@ -225,4 +269,5 @@ unsubSteps?.();
 **注意**：
 - 该策略是纯模式制（无路径放行表），`danger-full-access` 即等效放行一切程序与路径
 - 全盘可写意味着 agent 可读写全盘，请仅在可信的常驻远程控制场景使用；普通操作不再触发审批，「带确认」仅作敏感操作的兜底
+- 恢复安全默认：把 `cordis.patch.yml` 改回 `[]`（或删除提权条目）即可回到 `workspace-write`
 - 修改对每个新 headless 任务即时生效（无需重启 daemon）

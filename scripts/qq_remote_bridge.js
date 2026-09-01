@@ -20,6 +20,9 @@ const API_HOST = config.apiHost;
 const TOKEN_HOST = config.tokenHost;
 const REPLY_LIMIT = config.replyContentLimit || 1500;
 const CMD_TIMEOUT = config.commandTimeoutMs || 20000;
+// Send a startup greeting to every authorized openid when the bot comes
+// online (once per daemon process). Disable with "startupGreeting": false.
+const STARTUP_GREETING = config.startupGreeting !== false;
 // Workspace for every natural-language headless session: all conversations
 // spawned by the bridge run inside this directory (the headless runner uses
 // process.cwd() as the agent workspace). Portable default: %USERPROFILE%\dsh-qqbot-workspace.
@@ -99,6 +102,74 @@ function nextMsgSeq(msgId) {
   return next;
 }
 
+// ---- startup greeting (active message on WS READY) -----------------------
+// Active (proactive) C2C message: no msg_id, used for the online greeting.
+async function activeMessageToUser(userOpenid, content) {
+  const tok = await ensureToken();
+  const body = { msg_type: 0, content, msg_seq: 1 };
+  const r = await httpJson(API_HOST, "POST", "/v2/users/" + encodeURIComponent(userOpenid) + "/messages", {
+    Authorization: "QQBot " + tok
+  }, body);
+  log("GREETING status=" + r.status + " openid=" + userOpenid.slice(0, 8) + "… " + r.body.slice(0, 200));
+  return r;
+}
+
+// 中国法定节假日（放假首日）— 官方安排：国办发明电〔2025〕7 号（2026 年）。
+// 每年需更新本表；结构 [月, 日, 名称]。
+const CN_HOLIDAYS = [
+  [1, 1, "元旦"],
+  [2, 15, "春节"],
+  [4, 4, "清明节"],
+  [5, 1, "劳动节"],
+  [6, 19, "端午节"],
+  [9, 25, "中秋节"],
+  [10, 1, "国庆节"]
+];
+
+// Next Chinese statutory holiday at/after `date` (00:00 local), in days.
+function nextChineseHoliday(date) {
+  const now = new Date(date.getTime());
+  now.setHours(0, 0, 0, 0);
+  const y = now.getFullYear();
+  let best = null;
+  for (let yy = y; yy <= y + 1; yy++) {
+    for (const [m, d, name] of CN_HOLIDAYS) {
+      const ts = new Date(yy, m - 1, d);
+      if (ts < now) continue;
+      const days = Math.round((ts - now) / 86400000);
+      if (!best || days < best.days) best = { days, name, date: ts };
+    }
+  }
+  return best;
+}
+
+function buildGreeting() {
+  const now = new Date();
+  const week = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
+  const pad = n => String(n).padStart(2, "0");
+  const timeStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const h = now.getHours();
+  const greet = h >= 5 && h < 11 ? "早上好" : h >= 11 && h < 13 ? "中午好" : h >= 13 && h < 18 ? "下午好" : "晚上好";
+  const hol = nextChineseHoliday(now);
+  const holStr = hol
+    ? (hol.days === 0
+        ? `🎉 今天就是「${hol.name}」（${hol.date.getMonth() + 1}月${hol.date.getDate()}日）`
+        : `🗓 距离下一个法定节假日「${hol.name}」还有 ${hol.days} 天（${hol.date.getMonth() + 1}月${hol.date.getDate()}日）`)
+    : "🗓 暂无后续法定节假日数据";
+  return `${greet}！🤖 我上线了。\n\n📅 当前时间：${timeStr} 星期${week}\n${holStr}\n\n发「help」查看指令，或用自然语言让我干活～`;
+}
+
+// Send once per daemon process, right after WS READY.
+let greetingSent = false;
+function sendStartupGreeting() {
+  if (!STARTUP_GREETING || greetingSent) return;
+  greetingSent = true;
+  const content = buildGreeting();
+  for (const openid of AUTHPASS) {
+    activeMessageToUser(openid, content).catch(e => log("GREETING ERROR " + e.message));
+  }
+}
+
 // ---- read-only command execution ----------------------------------------
 // Whitelist of safe commands. Each entry: prefix -> validator/executor.
 // We ONLY run commands that are clearly read-only. The 3-arg execFile avoids
@@ -106,13 +177,54 @@ function nextMsgSeq(msgId) {
 // after a fixed binary. No shell, no metacharacter expansion.
 const ALLOWED = new Set([
   "help", "ls", "dir", "pwd", "cwd", "ps", "tasklist", "ipconfig", "systeminfo",
-  "whoami", "hostname", "ver", "date", "time", "echo"
+  "whoami", "hostname", "ver", "date", "time", "echo", "shutdown", "关机"
 ]);
 
 const DANGEROUS = /\b(del|erase|rmdir|rm|rd|format|shutdown|restart|reboot|reg\s+delete|kill|taskkill|move|copy|xcopy|ren|rename|mkdir|md|takeown|icacls|cipher|cacls|attrib|certutil|wevtutil|bcdedit|diskpart|vssadmin|format|mklink|remove|remove-item|clear|stop-process|stop-service|disable|uninstall|drop|truncate|write|set-content|add-content|out-file|>|<|>>|&&|\||;)\b/i;
 
 function stripDangerous(s) {
   return DANGEROUS.test(s);
+}
+
+// ---- shutdown command (scheduled power-off, cancellable) ------------------
+// 0 = no pending shutdown; >0 = epoch ms when the scheduled shutdown fires.
+let pendingShutdownAt = 0;
+const SHUTDOWN_DELAY_MS = 60000; // power off 60s after the command is received
+
+function execFileAsync(file, args) {
+  return new Promise(resolve => {
+    execFile(file, args, { timeout: 15000, windowsHide: true }, (err, so, se) => {
+      const text = ((so || "") + (se || "")).toString().trim();
+      resolve({ ok: !err, text: text || (err ? err.message : "") });
+    });
+  });
+}
+
+function scheduleShutdown() {
+  return execFileAsync("shutdown.exe", ["/s", "/t", String(Math.ceil(SHUTDOWN_DELAY_MS / 1000))]);
+}
+
+function cancelShutdown() {
+  return execFileAsync("shutdown.exe", ["/a"]);
+}
+
+// ---- permission-request relay (approval/asked -> QQ -> stdin) -------------
+// Set while the headless child is waiting on an approval decision. The next
+// user message answers it (同意/允许 -> allow, 拒绝/取消 -> reject).
+let pendingApprovalPid = null;
+
+function handleApprovalLine(detail) {
+  const sp = detail.indexOf(" ");
+  const pid = sp < 0 ? detail : detail.slice(0, sp);
+  const info = sp < 0 ? "" : detail.slice(sp + 1);
+  if (!pid) return;
+  pendingApprovalPid = pid;
+  log("APPROVAL requested pid=" + pid + " " + info.slice(0, 150));
+  const msg = "⚠️ Agent 请求更高权限：\n" + (info || "(未提供原因)") +
+    "\n\n回复「同意」= 本次任务转入全盘可写模式；「拒绝」= 维持工作区模式。";
+  for (const openid of AUTHPASS) {
+    activeMessageToUser(openid, msg).catch(e => log("APPROVAL MSG ERROR " + e.message));
+  }
 }
 
 function runCmd(cmd) {
@@ -224,7 +336,7 @@ function runHeadlessSession(task, onProgress) {
     const child = spawn(process.execPath, args, {
       cwd: ws,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"] // stdin: approval decisions from the user
     });
     activeHeadless = child;
 
@@ -236,13 +348,14 @@ function runHeadlessSession(task, onProgress) {
       clearInterval(progressTimer);
       if (activeHeadless === child) activeHeadless = null;
       if (activeTask && activeTask.startedAt === startedAt) activeTask = null;
+      if (pendingApprovalPid) pendingApprovalPid = null; // task gone, nothing to answer
       resolve(out.trim() || "[agent 未返回结论]");
     };
 
     // Accumulate non-STEP stdout/stderr (the final conclusion). [STEP] lines
     // are real intermediate steps -> forward to onProgress as live updates
     // and strip them from the accumulated output so the final reply is the
-    // agent's conclusion only.
+    // agent's conclusion only. [APPROVAL] lines are permission requests.
     let stepAccum = "";
     const handleChunk = (c) => {
       const s = c.toString("utf8");
@@ -250,6 +363,11 @@ function runHeadlessSession(task, onProgress) {
       const lines = stepAccum.split("\n");
       stepAccum = lines.pop(); // keep partial last line
       for (const ln of lines) {
+        const am = ln.match(/^\[APPROVAL\]\s*(.*)$/);
+        if (am) {
+          handleApprovalLine(am[1]);
+          continue;
+        }
         const m = ln.match(/^\[STEP\]\s*(.*)$/);
         if (m && onProgress) {
           // Record only actionable steps (tool calls) for progress queries;
@@ -303,18 +421,25 @@ async function execute(cmd, onProgress) {
   const trimmed = cmd.trim();
   if (!trimmed) return "[empty]";
 
-  // Interrupt command: kill the running headless task (if any), and do NOT
-  // start a new one. Recognized words trigger an abort of the current turn.
+  // Interrupt command: cancel a pending shutdown AND/OR kill the running
+  // headless task. Never starts a new session.
   if (isInterrupt(trimmed)) {
+    const msgs = [];
+    if (pendingShutdownAt > 0) {
+      pendingShutdownAt = 0;
+      const r = await cancelShutdown();
+      msgs.push(r.ok ? "✅ 已取消关机。" : "❌ 关机取消失败(" + r.text + ")，可能已进入关机流程。");
+    }
     if (activeHeadless && !activeHeadless.killed) {
       try { activeHeadless.kill("SIGTERM"); } catch (_) {}
       // Give it a moment then force if needed
       setTimeout(() => {
         if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} }
       }, 1500);
-      return "✅ 已中断当前正在运行的任务。";
+      msgs.push("✅ 已中断当前正在运行的任务。");
     }
-    return "当前没有正在运行的任务。";
+    if (!msgs.length) return "当前没有正在运行的任务，也没有待执行的关机。";
+    return msgs.join("\n");
   }
 
   // While a task is running, a new message must NOT spawn a second concurrent
@@ -347,8 +472,24 @@ async function execute(cmd, onProgress) {
       "  处理中发「进度」可立即查询当前进展",
       "━━━━━━━━━━━━━━━━━━",
       "🛑 中断当前任务",
-      "  中断 / 取消 / stop / cancel / abort"
+      "  中断 / 取消 / stop / cancel / abort",
+      "💻 关机",
+      "  shutdown / 关机  60 秒后关机",
+      "  期间发「中断 / 取消」可取消"
     ].join("\n");
+  }
+  if (first === "shutdown" || trimmed === "关机") {
+    if (trimmed !== "shutdown" && trimmed !== "关机") {
+      return "仅支持「shutdown」或「关机」(60 秒后关机)。不接受其它参数。";
+    }
+    if (pendingShutdownAt > 0) {
+      const left = Math.max(1, Math.ceil((pendingShutdownAt - Date.now()) / 1000));
+      return "已有关机计划(约 " + left + " 秒后关机)。发「中断 / 取消」可取消。";
+    }
+    const r = await scheduleShutdown();
+    if (!r.ok) return "❌ 关机调度失败: " + r.text;
+    pendingShutdownAt = Date.now() + SHUTDOWN_DELAY_MS;
+    return "🛑 将在 60 秒后关机。发送「中断 / 取消 / stop」可取消本次关机。";
   }
   if (isAllowed(trimmed)) {
     if (stripDangerous(trimmed)) {
@@ -443,6 +584,32 @@ async function handleEvent(d, t) {
   }
   log(`CMD openid=${openid} content=` + JSON.stringify(content));
 
+  // While an approval request is pending, the next user message answers it
+  // (before anything else: no ack, no new session, no interrupt handling).
+  if (pendingApprovalPid && activeHeadless && !activeHeadless.killed) {
+    const t = content.trim().toLowerCase();
+    const allow = /^(同意|允许|可以|批准|确认|ok|yes|是|好)$/i.test(t) || /^(同意|允许|可以|批准|确认)/.test(t);
+    const reject = /^(拒绝|不同意|不行|取消|中断|stop|cancel|abort|no|否|否决|不要)$/i.test(t) || /^(拒绝|不同意|否决)/.test(t);
+    let reply;
+    if (allow || reject) {
+      const pid = pendingApprovalPid;
+      pendingApprovalPid = null;
+      try {
+        if (activeHeadless.stdin) activeHeadless.stdin.write(`approval:${allow ? "allow" : "reject"}:${pid}\n`);
+      } catch (e) {
+        log("APPROVAL STDIN ERROR " + e.message);
+      }
+      reply = allow
+        ? "✅ 已授权：本次任务将以全盘可写模式继续。"
+        : "❌ 已拒绝：任务继续以工作区模式运行。";
+      log("APPROVAL answered allow=" + allow + " pid=" + pid);
+    } else {
+      reply = "当前有待确认的权限请求。请回复「同意」或「拒绝」。";
+    }
+    try { await replyToUser(openid, msgId, reply, nextMsgSeq(msgId)); } catch (e) { log("APPROVAL REPLY ERROR " + e.message); }
+    return;
+  }
+
   // Only acknowledge when a new headless session will actually be started:
   // progress queries and busy-notice messages (a task is already running and
   // this message won't spawn a session) must NOT get the "starting a new
@@ -528,6 +695,7 @@ function connect() {
       if (t === "READY") {
         sessionId = (msg.d && msg.d.session_id) || null;
         log("WS READY session=" + sessionId + " user=" + JSON.stringify(msg.d && msg.d.user));
+        sendStartupGreeting();
       } else {
         await handleEvent(msg.d, t);
       }
@@ -570,6 +738,9 @@ process.on("exit", code => {
   try { fs.writeFileSync(path.join(__dirname, "qq_remote_bridge.pid"), String(process.pid)); } catch (_) {}
   log("=== qq_remote_bridge starting, pid=" + process.pid + " ===");
   log("authorized openids: " + Array.from(AUTHPASS).join(","));
+  // Clear any stale scheduled shutdown left over from a previous daemon run,
+  // so a 30s power-off cannot silently fire after a daemon restart.
+  cancelShutdown().then(r => { if (r.ok) log("cleared stale pending shutdown"); });
   connect();
 })();
 

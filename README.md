@@ -14,6 +14,8 @@
 - **中断当前任务**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可**真正杀掉**正在运行的 agent 任务（而非再开一个）
 - **崩溃自愈**：`watchdog` 每 30s 检查 daemon，异常自动重启
 - **登录自启**：注册登录自启计划任务（Logon 触发 + 30s 延迟 + 失败重启，与 DSH 自身自启机制一致），Windows 登录后随 DSH 自动拉起
+- **上线问候**：机器人上线（WS READY）时向授权用户主动发送问候——当前时间、星期、距下一个中国法定节假日天数（官方 2026 安排，每年需更新 `CN_HOLIDAYS` 表）、按时段问候（早上/中午/下午/晚上）；可用配置 `startupGreeting: false` 关闭
+- **权限请求流转**：任务中 agent 需要更高权限（沙箱拒绝）时，主动推送请求到 QQ；回复「同意」= 该会话转入**全盘可写模式**继续，「拒绝」= 维持工作区模式（120 秒未回复自动拒绝）
 - **无窗口运行**：通过 `wscript` 隐藏控制台窗口，不打扰用户
 
 ### 消息流（自然语言任务）
@@ -60,6 +62,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 `
 2. 运行 `qq_bridge_watchdog.ps1` 启动看门狗
 3. 注册登录自启计划任务（见 `SKILL.md` 方式 B，Logon 触发 + 30s 延迟，与 DSH 自身自启机制一致）
 
+### 安装为 DSH skill（直接安装 / 询问 DSH 安装）
+
+**直接安装**（仓库根目录）：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1        # 安装到 ~/.dsh/skills/qq-remote-bridge
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Force # 覆盖重装
+```
+
+**询问 DSH 安装**：在任意 DSH 会话（web GUI / headless）里说：
+> 把 qq-remote-bridge skill 安装到技能目录，并协助部署机器人。
+
+DSH agent 会按 `SKILL.md` 执行安装与部署（复制目录 / 运行 `install.ps1` / 运行 `deploy.ps1`）。
+
 ## 从零接入（获取 appId / clientSecret / user_openid）
 
 1. 登录 [QQ 开放平台管理端](https://q.qq.com/) → 「机器人」→ 创建机器人
@@ -88,7 +103,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 | `echo <词>` | 回显 |
 | 任意自然语言 | 转交 DSH agent 新会话处理（工作区见 `workspace` 配置） |
 | `进度` / `进展` / `还在吗` | 任务进行中立即查询当前进度 |
-| `中断` / `取消` / `stop` | 终止正在运行的 agent 任务 |
+| `中断` / `取消` / `stop` | 终止正在运行的 agent 任务；也可取消待执行的关机 |
+| `shutdown` / `关机` | 调度 **60 秒后关机**（期间发 `中断`/`取消`/`stop` 可取消） |
 
 ## 日常运维
 
