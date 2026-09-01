@@ -7,7 +7,7 @@ description:
   触发场景：用户要求部署/接入腾讯或 QQ 机器人、重装系统后重新部署、通过 QQ 发指令查询本机、排查机器人收不到/回不了消息、启动/停止/卸载 QQ 桥。
 metadata:
   author: CoverSkyBlueUp
-  version: "2.2.1"
+  version: "2.2.2"
 ---
 
 # qq-remote-bridge Skill（可分享部署版）
@@ -186,6 +186,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 
 ## 八、版本记录
 
+- v2.2.2：**快捷指令与中断交互修复**——QQ 快捷面板斜杠指令（`/help`、`/ls`…）与无斜杠形式等价匹配白名单；中断确认菜单答案（序号/`全部`/`当前`/`取消`）**提前消费**，不再被误当成新任务入队导致超时无操作；裸控制词（无待确认弹窗时发 `全部`/`当前`/`确认` 等）不再开新会话；批次授权弹窗的 `取消`/`拒绝` 正确应答；**可选 DSH 会话清理集成**（`qqbot-session-cleanup.ps1` + 静默 VBS：持续归档隐藏未分组 qqbot 会话 + bot 启动时删除闲置会话，watchdog 自动联动，全部经 wscript 无窗口运行）
 - v2.2.1：**体验与经验沉淀**——help 面板分组统一；开机**全程无 PowerShell 弹窗**（watchdog 改经 wscript + VBS 静默启动）；权限提示统一 `🔐` 格式且**只列需求对应权限的指令**；白名单指令接入 **QQ 官方指令面板**（`register-panel.js`，`POST /v2/panels`）；并发加固（taskSlotBusy 原子占位防双开）与批次授权自动放行实测修复；实战排障经验沉淀见「九、实战经验沉淀」
 - v2.2.0：**权限请求流转**（agent 需更高权限时经 QQ 询问用户，同意则会话转入全盘可写模式，headless 补丁注册 approval answerer + stdin 决定回流）；**上线问候**（时间/星期/距下个法定节假日/时段问候，`startupGreeting` 可关）；**关机指令**（`shutdown`/`关机`，60 秒延时、可取消）；**安装方式**（`install.ps1` 直接安装 + 询问 DSH 安装两种途径）；安全默认文档化（workspace-write + 按需提权）
 - v2.1.2：推送与回复质量修复——进度推送**不再回推推理/思考内容**（仅工具动作；`[STEP]` 推理折叠单行防污染最终回复）；进度查询只显示工具步骤；修复 60s 节流竞态（曾导致进度连发爆发）；修复进度/忙碌消息**误发 ack**；**长结论分批发送**（默认 1500 字符/批，最多 6 批）
