@@ -7,6 +7,10 @@ qq_remote_bridge_watchdog.log
 # Local config (contains real secrets) — must never be committed
 qq_bridge_config.json
 
+# DSH session cleanup — local config (real paths/session ids) + runtime logs
+qqbot-session-cleanup.json
+qqbot-session-cleanup.log
+
 # OS junk
 Thumbs.db
 Desktop.ini

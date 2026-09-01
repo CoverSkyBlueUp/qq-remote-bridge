@@ -9,14 +9,16 @@
 - **常驻守护**：WebSocket 连接 QQ 开放平台网关，自动获取 / 刷新 `access_token`（7200s，提前 60s 刷新），断线自动重连、心跳保活
 - **仅响应授权 openid**：只有配置的 `authorizedOpenids` 里的单聊消息才会被处理
 - **白名单只读命令**：`help` / `ls` / `dir` / `ps` / `tasklist` / `ipconfig` / `systeminfo` / `whoami` / `hostname` / `ver` / `date` / `time` / `echo` 等，直接执行并返回（`help` 显示分组菜单）
+- **QQ 快捷面板斜杠命令**：以 `/` 开头的指令与无斜杠形式等价（`/help`、`/ls`、`/ps`、`/shutdown`、`/中断`、`/stop`…），可把常用指令加入 QQ 机器人的「快捷指令面板」直接触发
 - **自然语言 → DSH agent 会话**：任何非白名单的明确文字，转交 DSH `headless` 新会话处理（标准模式 + 可配置沙箱 + 可配置工作区，默认 `%USERPROFILE%\dsh-qqbot-workspace`），先发送确认消息，**处理过程中按节流间隔回推真实执行步骤**（仅工具动作，推理内容不回推），结束回推结论（超长自动分批）
 - **进度节流 + 按需查询**：进度推送至少间隔 `progressIntervalMs`（默认 60s）；任务进行中发 `进度` / `进展` / `进行到哪` / `还在吗` 等可**立即**收到当前进度，不会新建会话
-- **中断当前任务**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 可**真正杀掉**正在运行的 agent 任务（而非再开一个）
+- **中断当前任务（确认式菜单）**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 弹出确认菜单——回复队列序号 = 中断对应任务，`全部` = 终止全部(含当前)，`当前` = 仅中断当前，`取消` = 放弃（15 秒未回复默认不操作）；菜单答案会正确消费，**不会被误当成新任务入队**；无待确认弹窗时单独发 `全部`/`当前`/`确认` 等控制词也不会再开新会话
 - **崩溃自愈**：`watchdog` 每 30s 检查 daemon，异常自动重启
 - **登录自启**：注册登录自启计划任务（Logon 触发 + 30s 延迟 + 失败重启，与 DSH 自身自启机制一致），Windows 登录后随 DSH 自动拉起
 - **上线问候**：机器人上线（WS READY）时向授权用户主动发送问候——当前时间、星期、距下一个中国法定节假日天数（官方 2026 安排，每年需更新 `CN_HOLIDAYS` 表）、按时段问候（早上/中午/下午/晚上）；可用配置 `startupGreeting: false` 关闭
 - **权限请求流转**：任务中 agent 需要更高权限（沙箱拒绝）时，主动推送请求到 QQ；回复「同意」= 该会话转入**全盘可写模式**继续，「拒绝」= 维持工作区模式（120 秒未回复自动拒绝）
 - **无窗口运行**：通过 `wscript` 隐藏控制台窗口，不打扰用户
+- **DSH 会话自动清理（可选）**：`watchdog` 启动时可联动 `scripts/qqbot-session-cleanup.ps1`——自动归档（隐藏）新出现的 qqbot 未分组会话，并在 bot 启动时删除已完成/闲置的会话日志（见下方「DSH 会话清理」）
 
 ### 消息流（自然语言任务）
 
@@ -108,6 +110,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 | 可能联网的任务 | 先询问「🌐 是否允许联网？」——`允许` 联网执行，`拒绝` 不执行（一次授权，仅限本任务；15 秒未回复默认不执行） |
 | `中断` / `取消` / `stop` | **确认式**：队列非空时回复序号中断对应任务 / `全部` 终止全部 / `当前` 仅当前 / `取消` 放弃（15 秒未回复默认不操作）；顺带取消待执行的关机 |
 | `shutdown` / `关机` | 调度 **60 秒后关机**（期间发 `中断`/`取消`/`stop` 可取消） |
+| `/help`、`/ls`… | 与无斜杠形式等价，可加入 QQ 快捷指令面板直接触发 |
 
 ## 日常运维
 
@@ -121,6 +124,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File check-status.ps1
 | 发主动消息 | `node send_active_msg.js "你好，世界"`（利用配置里的 openid） |
 
 自定义命令：编辑 `qq_remote_bridge.js` 中的 `ALLOWED`（只读白名单）与 `DANGEROUS`（危险关键字正则）。
+
+## DSH 会话清理（可选集成）
+
+机器人每次自然语言任务都会在 DSH 里新建一个会话（默认工作区见 `workspace` 配置），长时间使用会留下大量历史会话。仓库附带 `scripts/qqbot-session-cleanup.ps1`（含静默启动器 `qqbot-session-cleanup.vbs`），提供两级清理：
+
+1. **持续归档（隐藏）**：配置一个每分钟计划任务运行
+   `wscript.exe "<部署目录>\scripts\qqbot-session-cleanup.vbs" -ArchiveOnly`，
+   新出现的**未分组** qqbot 会话会被归档，不会出现在 DSH web 侧边栏。
+2. **启动即删**：`qq_bridge_watchdog.ps1` 每次 bot 启动/重启时自动执行完整清理——
+   先归档漏网会话，再删除**已隐藏、非运行、闲置超过 `graceMinutes`** 的会话日志，并同步清理
+   DSH 的 `workspace.json` / `session_projcache.json` 记录（自动 `.bak` 备份）。
+
+配置：复制 `templates/qqbot-session-cleanup.json.template` 为 `qqbot-session-cleanup.json`
+（与脚本同目录，已被 `.gitignore` 排除），填入 `baseUrl`（DSH web 地址）、`workspace`
+（机器人工作区）、`protectedSessionIds`（**必须**列入当前正在使用的会话，否则会被清理）、
+`graceMinutes`（闲置判定，默认 2 分钟）。清理日志写入同目录 `qqbot-session-cleanup.log`。
+watchdog 会在自身目录或上级 `.monitor` 目录查找清理启动器，找不到则跳过（功能优雅关闭）。
+
+> ⚠️ `protectedSessionIds` 留空时，所有已隐藏且闲置的 qqbot 会话都会被删除——请先把你
+> 正在使用的 DSH 会话 id 填进去。
 
 ## 安全边界
 

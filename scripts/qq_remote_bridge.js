@@ -593,23 +593,30 @@ function runHeadlessSession(task, onProgress, batchId) {
 // These are matched first (before whitelist / danger checks) so they never
 // spawn a new session.
 const INTERRUPT_WORDS = new Set(["中断", "取消", "停止", "stop", "cancel", "abort", "halt"]);
+// QQ quick-command panel sends slash-prefixed commands (e.g. "/help"); strip
+// leading "/" so they match the same whitelist as their bare form.
+function normalizeSlash(s) {
+  const t = s.trim();
+  return t.replace(/^\/+/, "").trimStart();
+}
 function isInterrupt(cmd) {
-  const t = cmd.trim().toLowerCase();
+  const t = normalizeSlash(cmd).toLowerCase();
   return INTERRUPT_WORDS.has(t) || INTERRUPT_WORDS.has(t.replace(/[。.!！]/g, ""));
 }
 
 function isAllowed(cmd) {
-  const first = cmd.trim().split(/\s+/)[0].toLowerCase();
+  const first = normalizeSlash(cmd).split(/\s+/)[0].toLowerCase();
   return ALLOWED.has(first);
 }
 
 async function execute(cmd, onProgress, opts) {
   const trimmed = cmd.trim();
-  if (!trimmed) return "[empty]";
+  const normalized = normalizeSlash(trimmed); // quick-panel "/cmd" behaves as "cmd"
+  if (!normalized) return "[empty]";
 
   // Interrupt command: cancel a pending shutdown, clear the task queue, and/or
   // kill the running headless task. Never starts a new session.
-  if (isInterrupt(trimmed)) {
+  if (isInterrupt(normalized)) {
     const msgs = [];
     if (taskQueue.length > 0) {
       const n = taskQueue.length;
@@ -638,14 +645,14 @@ async function execute(cmd, onProgress, opts) {
   // push with the current progress + the queued tasks. opts.skipBusy lets a
   // split batch's first part run immediately (its siblings are already queued).
   if (!(opts && opts.skipBusy) && (taskSlotBusy || (activeHeadless && !activeHeadless.killed) || taskQueue.length > 0)) {
-    if (isProgressQuery(trimmed)) return queueStatus();
-    if (!isWhitelistCommand(trimmed)) {
+    if (isProgressQuery(normalized)) return queueStatus();
+    if (!isWhitelistCommand(normalized)) {
       taskQueue.push({ text: trimmed, msgId: "", openid: "" });
       return "📥 已加入任务队列(第 " + taskQueue.length + " 位):「" + trimmed.slice(0, 40) + "」\n当前任务完成后将自动执行。发「进度」可查看当前进度与队列。";
     }
   }
 
-  const first = trimmed.split(/\s+/)[0].toLowerCase();
+  const first = normalized.split(/\s+/)[0].toLowerCase();
   if (first === "help") {
     const L = "━━━━━━━━━━━━━━━━━━";
     return [
@@ -669,6 +676,7 @@ async function execute(cmd, onProgress, opts) {
       "  任意自然语言   转交 AI agent 处理",
       "  进度           当前任务进度 + 队列",
       "  中断 / 取消    终止任务(确认式) / 取消关机",
+      "  以 / 开头同样有效(快捷面板): /help /ls /ps 等",
       L,
       "💻 系统控制",
       "  shutdown / 关机  60 秒后关机(可取消)",
@@ -677,8 +685,8 @@ async function execute(cmd, onProgress, opts) {
       "  联网 / 全盘任务需授权，15 秒未回复默认拒绝"
     ].join("\n");
   }
-  if (first === "shutdown" || trimmed === "关机") {
-    if (trimmed !== "shutdown" && trimmed !== "关机") {
+  if (first === "shutdown" || normalized === "关机") {
+    if (normalized !== "shutdown" && normalized !== "关机") {
       return "仅支持「shutdown」或「关机」(60 秒后关机)。不接受其它参数。";
     }
     if (pendingShutdownAt > 0) {
@@ -690,11 +698,11 @@ async function execute(cmd, onProgress, opts) {
     pendingShutdownAt = Date.now() + SHUTDOWN_DELAY_MS;
     return "🛑 将在 60 秒后关机。发送「中断 / 取消 / stop」可取消本次关机。";
   }
-  if (isAllowed(trimmed)) {
-    if (stripDangerous(trimmed)) {
+  if (isAllowed(normalized)) {
+    if (stripDangerous(normalized)) {
       return "[拒绝] 检测到危险关键字，已阻止执行。";
     }
-    const out = await runCmd(trimmed);
+    const out = await runCmd(normalized);
     return out;
   }
   // Non-whitelist explicit text -> delegate to a fresh DSH headless session
@@ -799,7 +807,7 @@ async function decodeData(data) {
 // the daemon (including "help"). Everything else is delegated to a headless
 // agent session.
 function isWhitelistCommand(cmd) {
-  const first = cmd.trim().split(/\s+/)[0].toLowerCase();
+  const first = normalizeSlash(cmd).split(/\s+/)[0].toLowerCase();
   return first === "help" || ALLOWED.has(first);
 }
 
@@ -821,7 +829,7 @@ async function handleEvent(d, t) {
   // While an approval request is pending, the next user message answers it
   // (before anything else: no ack, no new session, no interrupt handling).
   if (pendingApprovalPid && activeHeadless && !activeHeadless.killed) {
-    const t = content.trim().toLowerCase();
+    const t = normalizeSlash(content).toLowerCase();
     const allow = /^(同意|允许|可以|批准|确认|ok|yes|是|好)$/i.test(t) || /^(同意|允许|可以|批准|确认)/.test(t);
     const reject = /^(拒绝|不同意|不行|取消|中断|stop|cancel|abort|no|否|否决|不要)$/i.test(t) || /^(拒绝|不同意|否决)/.test(t);
     let reply;
@@ -851,7 +859,7 @@ async function handleEvent(d, t) {
   // -> ack -> execute) exactly once.
   let netApproved = false;
   if (pendingNetAsk) {
-    const t = content.trim().toLowerCase();
+    const t = normalizeSlash(content).toLowerCase();
     const allow = /^(允许|同意|可以|是|好|ok|yes)$/i.test(t) || /^(允许|同意|可以|是)/.test(t);
     const deny = /^(拒绝|不用|不要|否|取消|不行|中断|stop|cancel|abort|no)$/i.test(t) || /^(拒绝|不用|否|取消|中断)/.test(t);
     if (allow || deny) {
@@ -871,6 +879,68 @@ async function handleEvent(d, t) {
       return;
     }
   }
+  // ---- interrupt confirmation ANSWER ---------------------------------------
+  // The interrupt-selection menu awaits one answer: a queue number, 全部, 当前,
+  // 确认, or 取消. This must run BEFORE the isInterrupt() gate below: menu
+  // answers like 全部/当前/确认 are not themselves interrupt words, so gating
+  // the consumption on isInterrupt() let them fall through and get enqueued
+  // as tasks (and the menu then timed out with no operation).
+  if (pendingInterrupt) {
+    const t = normalizeSlash(content).toLowerCase();
+    clearTimeout(pendingInterrupt.timer);
+    pendingInterrupt = null;
+    const num = /^(\d+)$/.exec(t);
+    const all = /^(全部|所有|全|all)$/i.test(t);
+    const cur = /^(当前|现在|本次)$/i.test(t);
+    const confirm = /^(确认|是|确定|yes|ok)$/i.test(t);
+    const cancel = /^(取消|否|放弃|算了|no)$/i.test(t) || t.startsWith("取消");
+    let reply;
+    if (num) {
+      const idx = Number(num[1]) - 1;
+      if (idx >= 0 && idx < taskQueue.length) {
+        const removed = taskQueue.splice(idx, 1)[0];
+        reply = "✅ 已从队列移除第 " + num[1] + " 项：「" + String(removed.text).slice(0, 40) + "」\n当前任务继续运行。";
+      } else {
+        reply = "❌ 序号超出范围(队列共 " + taskQueue.length + " 项)。";
+      }
+    } else if (all) {
+      const n = taskQueue.length;
+      taskQueue = [];
+      if (activeHeadless && !activeHeadless.killed) {
+        try { activeHeadless.kill("SIGTERM"); } catch (_) {}
+        setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
+      }
+      reply = "✅ 已终止全部任务(队列 " + n + " 项 + 当前任务)。";
+    } else if (cur) {
+      if (activeHeadless && !activeHeadless.killed) {
+        try { activeHeadless.kill("SIGTERM"); } catch (_) {}
+        setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
+      }
+      reply = "✅ 已中断当前任务，队列保留。";
+    } else if (confirm && taskQueue.length === 0) {
+      // no queue: plain "确认" interrupts the current task
+      if (activeHeadless && !activeHeadless.killed) {
+        try { activeHeadless.kill("SIGTERM"); } catch (_) {}
+        setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
+      }
+      reply = "✅ 已中断当前正在运行的任务。";
+    } else if (cancel) {
+      reply = "已取消中断操作，当前任务与队列均不受影响。";
+    } else {
+      pendingInterrupt = { timer: setTimeout(() => {
+        if (pendingInterrupt) {
+          pendingInterrupt = null;
+          for (const openid2 of AUTHPASS) {
+            activeMessageToUser(openid2, "⏱ 中断确认等待超时(15 秒)，默认不中断任何任务，当前任务继续运行。").catch(() => {});
+          }
+        }
+      }, CONFIRM_TIMEOUT_MS) };
+      reply = "请回复队列序号(1-" + taskQueue.length + ")、「全部」「当前」或「取消」。";
+    }
+    try { await replyToUser(openid, msgId, reply, nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
+    return;
+  }
+
   if (NET_ASK && !netApproved && !isWhitelistCommand(content) && !isInterrupt(content) && !isProgressQuery(content) && NET_TASK_RE.test(content)) {
     // Only list the instructions that actually need network access.
     const parts = splitInstructions(content);
@@ -892,102 +962,11 @@ async function handleEvent(d, t) {
     return;
   }
 
-  // ---- interrupt confirmation: which queued task / all / current ----------
-  // 中断 now asks before acting. With queued tasks, the user picks one by
-  // number, or 全部 (all + current), or 当前 (current only), or 取消 (nothing).
-  // 15s timeout defaults to NO operation (current task flow continues).
-  if (isInterrupt(content)) {
-    const t = content.trim().toLowerCase();
-    if (pendingInterrupt) {
-      clearTimeout(pendingInterrupt.timer);
-      pendingInterrupt = null;
-      const num = /^(\d+)$/.exec(t);
-      const all = /^(全部|所有|全|all)$/i.test(t);
-      const cur = /^(当前|现在|本次)$/i.test(t);
-      const confirm = /^(确认|是|确定|yes|ok)$/i.test(t);
-      const cancel = /^(取消|否|放弃|算了|no)$/i.test(t) || t.startsWith("取消");
-      let reply;
-      if (num) {
-        const idx = Number(num[1]) - 1;
-        if (idx >= 0 && idx < taskQueue.length) {
-          const removed = taskQueue.splice(idx, 1)[0];
-          reply = "✅ 已从队列移除第 " + num[1] + " 项：「" + String(removed.text).slice(0, 40) + "」\n当前任务继续运行。";
-        } else {
-          reply = "❌ 序号超出范围(队列共 " + taskQueue.length + " 项)。";
-        }
-      } else if (all) {
-        const n = taskQueue.length;
-        taskQueue = [];
-        if (activeHeadless && !activeHeadless.killed) {
-          try { activeHeadless.kill("SIGTERM"); } catch (_) {}
-          setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
-        }
-        reply = "✅ 已终止全部任务(队列 " + n + " 项 + 当前任务)。";
-      } else if (cur) {
-        if (activeHeadless && !activeHeadless.killed) {
-          try { activeHeadless.kill("SIGTERM"); } catch (_) {}
-          setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
-        }
-        reply = "✅ 已中断当前任务，队列保留。";
-      } else if (confirm && taskQueue.length === 0) {
-        // no queue: plain "确认" interrupts the current task
-        if (activeHeadless && !activeHeadless.killed) {
-          try { activeHeadless.kill("SIGTERM"); } catch (_) {}
-          setTimeout(() => { if (activeHeadless && !activeHeadless.killed) { try { activeHeadless.kill("SIGKILL"); } catch (_) {} } }, 1500);
-        }
-        reply = "✅ 已中断当前正在运行的任务。";
-      } else if (cancel) {
-        reply = "已取消中断操作，当前任务与队列均不受影响。";
-      } else {
-        pendingInterrupt = { timer: setTimeout(() => {
-          if (pendingInterrupt) {
-            pendingInterrupt = null;
-            for (const openid2 of AUTHPASS) {
-              activeMessageToUser(openid2, "⏱ 中断确认等待超时(15 秒)，默认不中断任何任务，当前任务继续运行。").catch(() => {});
-            }
-          }
-        }, CONFIRM_TIMEOUT_MS) };
-        reply = "请回复队列序号(1-" + taskQueue.length + ")、「全部」「当前」或「取消」。";
-      }
-      try { await replyToUser(openid, msgId, reply, nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
-      return;
-    }
-    // new interrupt request: cancel a pending shutdown immediately (safe
-    // cancel action), then present the task-interrupt selection dialog.
-    let sdMsg = "";
-    if (pendingShutdownAt > 0) {
-      pendingShutdownAt = 0;
-      const r = await cancelShutdown();
-      sdMsg = r.ok ? "✅ 已取消关机。\n" : "❌ 关机取消失败(" + r.text + ")。\n";
-    }
-    if ((activeHeadless && !activeHeadless.killed) || taskQueue.length > 0) {
-      let msg;
-      if (taskQueue.length > 0) {
-        const list = taskQueue.map((q, i) => "  " + (i + 1) + ". " + String(q.text).slice(0, 50)).join("\n");
-        msg = sdMsg + "🛑 当前有 " + taskQueue.length + " 个任务在队列中：\n" + list +
-          "\n回复「序号」= 中断对应队列任务；「全部」= 终止全部(含当前)；「当前」= 仅中断当前任务；「取消」= 放弃。\n15 秒内未回复默认不操作。";
-      } else {
-        msg = sdMsg + "🛑 是否中断当前正在运行的任务？\n回复「确认 / 是」= 中断；「取消」= 继续。\n15 秒内未回复默认不中断。";
-      }
-      pendingInterrupt = { timer: setTimeout(() => {
-        if (pendingInterrupt) {
-          pendingInterrupt = null;
-          for (const openid2 of AUTHPASS) {
-            activeMessageToUser(openid2, "⏱ 中断确认等待超时(15 秒)，默认不中断任何任务，当前任务继续运行。").catch(() => {});
-          }
-        }
-      }, CONFIRM_TIMEOUT_MS) };
-      try { await replyToUser(openid, msgId, msg, nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
-      return;
-    }
-    try { await replyToUser(openid, msgId, sdMsg + "当前没有正在运行的任务，也没有待执行的队列。", nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
-    return;
-  }
-
-  // ---- batch authorization + auto-split -----------------------------------
-  // A split batch whose parts all need the same permission (all web-access or
-  // all full-access) is authorized ONCE for the whole queue; a mixed batch
-  // asks for web-access and full-access separately.
+  // ---- batch full-access authorization -------------------------------------
+  // Consumed BEFORE the interrupt gate below: the answer 取消/拒绝 is also an
+  // interrupt word and must answer this pending prompt, not open a new
+  // interrupt dialog. A split batch whose parts all need full-access is
+  // authorized ONCE for the whole queue; a mixed batch asks separately.
   let splitNotified = false;
   // True when a split batch's FIRST part should run immediately (its siblings
   // are already queued) — skips the busy/queue checks that would re-queue it.
@@ -995,7 +974,7 @@ async function handleEvent(d, t) {
   // batchId of the first part when it runs immediately (keeps its batch grant).
   let batchFirstId = null;
   if (pendingBatchFullAsk) {
-    const t = content.trim().toLowerCase();
+    const t = normalizeSlash(content).toLowerCase();
     const allow = /^(允许|同意|可以|是|好|ok|yes)$/i.test(t) || /^(允许|同意|可以|是)/.test(t);
     const deny = /^(拒绝|不用|不要|否|取消|不行|no)$/i.test(t) || /^(拒绝|不用|否|取消)/.test(t);
     if (allow || deny) {
@@ -1027,6 +1006,51 @@ async function handleEvent(d, t) {
       try { await replyToUser(openid, msgId, "当前有待确认的本批权限请求。请回复「允许」或「拒绝」。", nextMsgSeq(msgId)); } catch (e) { log("BATCH REPLY ERROR " + e.message); }
       return;
     }
+  }
+
+  // ---- bare control words (no pending dialog) ------------------------------
+  // 全部/当前/确认 etc. sent outside any confirmation dialog are dialog
+  // answers, not tasks: never spawn or queue a headless session for them.
+  if (/^(全部|所有|全|当前|现在|本次|确认|确定|all|current|confirm)$/i.test(normalizeSlash(content))) {
+    try { await replyToUser(openid, msgId, "当前没有待确认的中断/权限请求。如需中断任务，请发送「中断」或「stop」。", nextMsgSeq(msgId)); } catch (e) { log("CONTROL REPLY ERROR " + e.message); }
+    return;
+  }
+
+  // ---- interrupt confirmation: which queued task / all / current ----------
+  // (Menu answers are consumed above, before this gate.) A new 中断 request
+  // cancels a pending shutdown immediately (safe cancel action), then presents
+  // the task-interrupt selection dialog. 15s timeout = no operation.
+  if (isInterrupt(content)) {
+    // new interrupt request: cancel a pending shutdown immediately (safe
+    // cancel action), then present the task-interrupt selection dialog.
+    let sdMsg = "";
+    if (pendingShutdownAt > 0) {
+      pendingShutdownAt = 0;
+      const r = await cancelShutdown();
+      sdMsg = r.ok ? "✅ 已取消关机。\n" : "❌ 关机取消失败(" + r.text + ")。\n";
+    }
+    if ((activeHeadless && !activeHeadless.killed) || taskQueue.length > 0) {
+      let msg;
+      if (taskQueue.length > 0) {
+        const list = taskQueue.map((q, i) => "  " + (i + 1) + ". " + String(q.text).slice(0, 50)).join("\n");
+        msg = sdMsg + "🛑 当前有 " + taskQueue.length + " 个任务在队列中：\n" + list +
+          "\n回复「序号」= 中断对应队列任务；「全部」= 终止全部(含当前)；「当前」= 仅中断当前任务；「取消」= 放弃。\n15 秒内未回复默认不操作。";
+      } else {
+        msg = sdMsg + "🛑 是否中断当前正在运行的任务？\n回复「确认 / 是」= 中断；「取消」= 继续。\n15 秒内未回复默认不中断。";
+      }
+      pendingInterrupt = { timer: setTimeout(() => {
+        if (pendingInterrupt) {
+          pendingInterrupt = null;
+          for (const openid2 of AUTHPASS) {
+            activeMessageToUser(openid2, "⏱ 中断确认等待超时(15 秒)，默认不中断任何任务，当前任务继续运行。").catch(() => {});
+          }
+        }
+      }, CONFIRM_TIMEOUT_MS) };
+      try { await replyToUser(openid, msgId, msg, nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
+      return;
+    }
+    try { await replyToUser(openid, msgId, sdMsg + "当前没有正在运行的任务，也没有待执行的队列。", nextMsgSeq(msgId)); } catch (e) { log("INTERRUPT REPLY ERROR " + e.message); }
+    return;
   }
 
   if (AUTO_SPLIT && !isWhitelistCommand(content) && !isInterrupt(content) && !isProgressQuery(content)) {

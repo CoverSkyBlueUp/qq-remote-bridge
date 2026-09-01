@@ -1,0 +1,7 @@
+{
+  "baseUrl": "http://127.0.0.1:3080",
+  "workspace": "D:\\path\\to\\your\\workspace",
+  "graceMinutes": 2,
+  "protectedSessionIds": [],
+  "logFile": ""
+}
