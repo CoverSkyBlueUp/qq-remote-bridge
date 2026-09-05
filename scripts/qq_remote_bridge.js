@@ -188,7 +188,82 @@ function nextChineseHoliday(date) {
   return best;
 }
 
-function buildGreeting() {
+// ---- weather in the startup greeting (optional) ----------------------------
+// Open-Meteo forecast API — no API key, HTTPS, precise by lat/lon. Configure
+// "weatherLat" + "weatherLon" (+ optional "weatherName") in qq_bridge_config.json;
+// without coordinates the greeting simply omits weather. Fetch failure or
+// timeout degrades to no-weather gracefully (greeting still goes out).
+const WEATHER_LAT = Number(config.weatherLat) || 0;
+const WEATHER_LON = Number(config.weatherLon) || 0;
+const WEATHER_NAME = (config.weatherName || "").toString();
+const WEATHER_URL = WEATHER_LAT && WEATHER_LON
+  ? "https://api.open-meteo.com/v1/forecast?latitude=" + WEATHER_LAT + "&longitude=" + WEATHER_LON +
+    "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m" +
+    "&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1"
+  : null;
+const WEATHER_TIMEOUT_MS = 6000;
+
+// WMO weather code ranges -> [中文描述, emoji].
+const WMO_TABLE = [
+  [0, 0, "晴", "☀️"], [1, 1, "大致晴朗", "🌤️"], [2, 2, "局部多云", "⛅"], [3, 3, "阴", "☁️"],
+  [45, 48, "雾", "🌫️"], [51, 55, "毛毛雨", "🌦️"], [56, 57, "冻毛毛雨", "🌧️"],
+  [61, 61, "小雨", "🌧️"], [62, 62, "中雨", "🌧️"], [63, 63, "大雨", "🌧️"],
+  [66, 67, "冻雨", "🌧️"], [71, 71, "小雪", "🌨️"], [72, 72, "中雪", "🌨️"],
+  [73, 73, "大雪", "❄️"], [75, 75, "大雪", "❄️"], [77, 77, "雪粒", "❄️"],
+  [80, 82, "阵雨", "🌦️"], [85, 86, "阵雪", "🌨️"], [95, 95, "雷暴", "⛈️"],
+  [96, 99, "雷暴伴冰雹", "⛈️"]
+];
+function wmoInfo(code) {
+  for (const [lo, hi, zh, emoji] of WMO_TABLE) if (code >= lo && code <= hi) return [zh, emoji];
+  return ["天气未知", "🌡️"];
+}
+
+// Plain HTTPS GET returning parsed JSON (weather endpoint only).
+function httpsGetJson(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { timeout: timeoutMs }, res => {
+      let d = "";
+      res.setEncoding("utf8");
+      res.on("data", c => { d += c; });
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode, json: JSON.parse(d) }); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("weather request timeout")));
+    req.on("error", reject);
+  });
+}
+
+// One-line weather summary for the startup greeting; "" when disabled,
+// unreachable, or the payload is unusable.
+async function fetchWeatherSummary() {
+  if (!WEATHER_URL) return "";
+  try {
+    const r = await httpsGetJson(WEATHER_URL, WEATHER_TIMEOUT_MS);
+    if (r.status !== 200 || !r.json || !r.json.current) return "";
+    const cur = r.json.current;
+    const daily = r.json.daily || {};
+    const [zh, emoji] = wmoInfo(cur.weather_code);
+    const city = WEATHER_NAME ? WEATHER_NAME + " " : "";
+    const line1 = `${emoji} ${city}天气：${zh}，当前 ${Math.round(cur.temperature_2m)}°C` +
+      (cur.apparent_temperature === undefined ? "" : `（体感 ${Math.round(cur.apparent_temperature)}°C）`);
+    const bits = [];
+    if (daily.temperature_2m_min && daily.temperature_2m_max) {
+      bits.push(`今日 ${Math.round(daily.temperature_2m_min[0])}°C ~ ${Math.round(daily.temperature_2m_max[0])}°C`);
+    }
+    if (cur.relative_humidity_2m !== undefined) bits.push(`湿度 ${cur.relative_humidity_2m}%`);
+    if (cur.wind_speed_10m !== undefined) bits.push(`风 ${cur.wind_speed_10m}km/h`);
+    return bits.length ? line1 + "\n" + bits.join(" ｜ ") : line1;
+  } catch (e) {
+    log("WEATHER ERROR " + e.message);
+    return "";
+  }
+}
+
+// Weather is fetched asynchronously (short timeout) and appended when
+// available; the base greeting never blocks on it for long.
+async function buildGreeting() {
   const now = new Date();
   const week = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
   const pad = n => String(n).padStart(2, "0");
@@ -201,7 +276,10 @@ function buildGreeting() {
         ? `🎉 今天就是「${hol.name}」（${hol.date.getMonth() + 1}月${hol.date.getDate()}日）`
         : `🗓 距离下一个法定节假日「${hol.name}」还有 ${hol.days} 天（${hol.date.getMonth() + 1}月${hol.date.getDate()}日）`)
     : "🗓 暂无后续法定节假日数据";
-  return `${greet}！🤖 我上线了。\n\n📅 当前时间：${timeStr} 星期${week}\n${holStr}\n\n发「help」查看指令，或用自然语言让我干活～`;
+  const weatherStr = await fetchWeatherSummary();
+  return `${greet}！🤖 我上线了。\n\n📅 当前时间：${timeStr} 星期${week}\n${holStr}` +
+    (weatherStr ? "\n" + weatherStr : "") +
+    `\n\n发「help」查看指令，或用自然语言让我干活～`;
 }
 
 // Send once per daemon process, right after WS READY.
@@ -209,10 +287,12 @@ let greetingSent = false;
 function sendStartupGreeting() {
   if (!STARTUP_GREETING || greetingSent) return;
   greetingSent = true;
-  const content = buildGreeting();
-  for (const openid of AUTHPASS) {
-    activeMessageToUser(openid, content).catch(e => log("GREETING ERROR " + e.message));
-  }
+  buildGreeting().then(content => {
+    log("GREETING: " + content.replace(/\n+/g, " / ").slice(0, 400));
+    for (const openid of AUTHPASS) {
+      activeMessageToUser(openid, content).catch(e => log("GREETING ERROR " + e.message));
+    }
+  }).catch(e => log("GREETING BUILD ERROR " + e.message));
 }
 
 // ---- read-only command execution ----------------------------------------

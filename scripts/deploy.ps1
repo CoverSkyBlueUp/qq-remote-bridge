@@ -1,4 +1,4 @@
-# qq-remote-bridge one-click installer.
+﻿# qq-remote-bridge one-click installer.
 # Run from the extracted bundle directory. Portable: the install dir is this
 # script's own folder, so the bundle can live anywhere.
 #
@@ -18,7 +18,11 @@ param(
   [string]$OpenId,
   [string]$DshBin,
   [string]$Workspace,
-  [int]$ProgressIntervalMs
+  [int]$ProgressIntervalMs,
+  [double]$WeatherLat,
+  [double]$WeatherLon,
+  [string]$WeatherCity,
+  [switch]$NoWeather
 )
 
 $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -65,7 +69,46 @@ if (-not $cfg.authorizedOpenids -or $cfg.authorizedOpenids.Count -eq 0) {
   exit 1
 }
 
-$cfg | ConvertTo-Json -Depth 5 | Set-Content -Path $ConfigPath -Encoding UTF8
+# ---- weather auto-config (public-IP geolocation) ---------------------------
+# The startup greeting can report today's weather when the config carries
+# weatherLat/weatherLon (Open-Meteo forecast, no API key). Unless overridden,
+# fill them from the machine's public-IP location (ip-api.com, free, zh-CN).
+# NOTE: a VPN / cloud egress makes the IP location differ from the physical
+# one — pass -WeatherLat/-WeatherLon (+-WeatherCity) to pin the city, or
+# -NoWeather to leave weather disabled. Existing weather settings are kept on
+# a re-deploy.
+if (-not $NoWeather) {
+  if ($WeatherLat -and $WeatherLon) {
+    $cfg.weatherLat = $WeatherLat
+    $cfg.weatherLon = $WeatherLon
+    if ($WeatherCity) { $cfg.weatherName = $WeatherCity }
+    Write-Step "天气: 手动指定 ($WeatherLat, $WeatherLon)$(if ($WeatherCity) { '，' + $WeatherCity })"
+  } elseif (-not $cfg.weatherLat -or -not $cfg.weatherLon) {
+    try {
+      $geo = Invoke-RestMethod -Uri "http://ip-api.com/json/?lang=zh-CN&fields=status,country,regionName,city,lat,lon" -TimeoutSec 8
+      if ($geo -and $geo.status -eq "success" -and $geo.lat -and $geo.lon) {
+        $cfg.weatherLat = [double]$geo.lat
+        $cfg.weatherLon = [double]$geo.lon
+        $cfg.weatherName = ([string]$geo.city).Trim()
+        if (-not $cfg.weatherName) { $cfg.weatherName = ([string]$geo.regionName).Trim() }
+        Write-Step "天气: 自动定位 → $($geo.country) $($geo.regionName) $($geo.city)（$($geo.lat), $($geo.lon)）；如不准可用 -WeatherLat/-WeatherLon 覆盖"
+      } else {
+        Write-Step "天气: IP 定位不可用，未配置天气（可用 -WeatherLat/-WeatherLon 手动指定）" -ForegroundColor Yellow
+      }
+    } catch {
+      Write-Step "天气: IP 定位请求失败（$($_.Exception.Message)），未配置天气" -ForegroundColor Yellow
+    }
+  } else {
+    Write-Step "天气: 保留已有配置 ($($cfg.weatherLat), $($cfg.weatherLon) $($cfg.weatherName))"
+  }
+} else {
+  Write-Step "天气: 已通过 -NoWeather 关闭"
+}
+
+# UTF-8 WITHOUT BOM: PowerShell's Set-Content -Encoding UTF8 writes a BOM that
+# Node's JSON.parse rejects, which crashes the daemon at startup.
+$cfgJson = $cfg | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText($ConfigPath, $cfgJson, (New-Object System.Text.UTF8Encoding($false)))
 Write-Step "配置已写入: $ConfigPath"
 Write-Step "  appId=$($cfg.appId)"
 Write-Step "  authorizedOpenids=$($cfg.authorizedOpenids -join ',')"

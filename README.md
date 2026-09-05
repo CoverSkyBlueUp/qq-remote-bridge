@@ -15,7 +15,7 @@
 - **中断当前任务（确认式菜单）**：处理中发 `中断` / `取消` / `stop` / `cancel` / `abort` 弹出确认菜单——回复队列序号 = 中断对应任务，`全部` = 终止全部(含当前)，`当前` = 仅中断当前，`取消` = 放弃（15 秒未回复默认不操作）；菜单答案会正确消费，**不会被误当成新任务入队**；无待确认弹窗时单独发 `全部`/`当前`/`确认` 等控制词也不会再开新会话
 - **崩溃自愈**：`watchdog` 每 30s 检查 daemon，异常自动重启
 - **登录自启**：注册登录自启计划任务（Logon 触发 + 30s 延迟 + 失败重启，与 DSH 自身自启机制一致），Windows 登录后随 DSH 自动拉起
-- **上线问候**：机器人上线（WS READY）时向授权用户主动发送问候——当前时间、星期、距下一个中国法定节假日天数（官方 2026 安排，每年需更新 `CN_HOLIDAYS` 表）、按时段问候（早上/中午/下午/晚上）；可用配置 `startupGreeting: false` 关闭
+- **上线问候（含今日天气）**：机器人上线（WS READY）时向授权用户主动发送问候——当前时间、星期、距下一个中国法定节假日天数（官方 2026 安排，每年需更新 `CN_HOLIDAYS` 表）、按时段问候（早上/中午/下午/晚上）；**配置了 `weatherLat`/`weatherLon` 后问候自动附带今日天气**（Open-Meteo 免 key：天气状况、当前温度/体感、今日高低温、湿度、风力）；可用配置 `startupGreeting: false` 关闭
 - **权限请求流转**：任务中 agent 需要更高权限（沙箱拒绝）时，主动推送请求到 QQ；回复「同意」= 该会话转入**全盘可写模式**继续，「拒绝」= 维持工作区模式（120 秒未回复自动拒绝）
 - **无窗口运行**：通过 `wscript` 隐藏控制台窗口，不打扰用户
 - **DSH 会话自动清理（可选）**：`watchdog` 启动时可联动 `scripts/qqbot-session-cleanup.ps1`——自动归档（隐藏）新出现的 qqbot 未分组会话，并在 bot 启动时删除已完成/闲置的会话日志（见下方「DSH 会话清理」）
@@ -53,9 +53,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1 `
 
 若 `dsh` 装在非默认路径，可加 `-DshBin "C:\...\dsh\lib\bin.js"`；工作区可用 `-Workspace "D:\my-workspace"` 覆盖（默认 `%USERPROFILE%\dsh-qqbot-workspace`）。脚本会：
 1. 生成 `qq_bridge_config.json`
-2. 注册登录自启计划任务 `DSH_QQ_Remote_Bridge`（随登录启动，自动移除旧 Startup 条目防双开）
-3. 启动 daemon + watchdog
-4. 打印日志
+2. **自动定位天气**：通过公网 IP 定位（ip-api.com，免 key）自动写入 `weatherLat`/`weatherLon`/`weatherName`，上线问候即报该地今日天气；已有配置会保留
+3. 注册登录自启计划任务 `DSH_QQ_Remote_Bridge`（随登录启动，自动移除旧 Startup 条目防双开）
+4. 启动 daemon + watchdog
+5. 打印日志
+
+> ⚠️ IP 定位走公网出口：若机器在 VPN / 云代理后，定位会偏离真实位置。此时用
+> `deploy.ps1 ... -WeatherLat <纬度> -WeatherLon <经度> -WeatherCity "城市名"` 手动钉住城市，
+> 或 `-NoWeather` 完全关闭问候天气。
 
 ### 方式 B：手动部署
 
